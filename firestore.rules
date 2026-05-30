@@ -1,0 +1,39 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    function isAuthed() {
+      return request.auth != null;
+    }
+
+    function hasHouseholdId() {
+      return request.resource.data.householdId is string
+        && request.resource.data.householdId.size() > 0;
+    }
+
+    function keepsHouseholdId() {
+      return resource.data.householdId == request.resource.data.householdId;
+    }
+
+    match /expenses/{docId} {
+      allow read: if isAuthed()
+        && resource.data.householdId is string;
+      allow create: if isAuthed() && hasHouseholdId();
+      allow update: if isAuthed()
+        && resource.data.householdId is string
+        && keepsHouseholdId();
+      allow delete: if isAuthed()
+        && resource.data.householdId is string;
+    }
+
+    match /installmentPlans/{docId} {
+      allow read: if isAuthed()
+        && resource.data.householdId is string;
+      allow create: if isAuthed() && hasHouseholdId();
+      allow update: if isAuthed()
+        && resource.data.householdId is string
+        && keepsHouseholdId();
+      allow delete: if isAuthed()
+        && resource.data.householdId is string;
+    }
+  }
+}

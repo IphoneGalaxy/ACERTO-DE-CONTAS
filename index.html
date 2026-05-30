@@ -25,6 +25,8 @@
     <script src="https://unpkg.com/@babel/standalone/babel.min.js" crossorigin="anonymous"></script>
     <!-- SheetJS -->
     <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+    <!-- Firebase config (gerado no deploy ou copie firebase-config.example.js) -->
+    <script src="firebase-config.js"></script>
     <!-- Firebase Modular SDK -->
     <script type="module">
       import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
@@ -78,6 +80,74 @@
                   "dark:text-slate-300 dark:hover:text-white dark:hover:bg-slate-800 transition-colors"
       };
 
+      /* ========= App Config ========= */
+      const CONFIG_STORAGE_KEY = 'meuAcertoAppConfig';
+      const PANEL_STORAGE_KEY = 'meuAcertoActivePanel';
+
+      const generateId = () => {
+        if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
+        return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+          const r = Math.random() * 16 | 0;
+          return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+        });
+      };
+
+      const loadAppConfig = () => {
+        try {
+          const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
+          if (!raw) return null;
+          return JSON.parse(raw);
+        } catch { return null; }
+      };
+
+      const saveAppConfig = (cfg) => {
+        try { localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(cfg)); } catch {}
+      };
+
+      const nameA = (cfg) => (cfg?.personA?.name || 'Pessoa 1').trim();
+      const nameB = (cfg) => (cfg?.personB?.name || 'Pessoa 2').trim();
+
+      const cardDisplaySource = (card) => `${card.label} (final ${card.last4})`;
+
+      const findCardByLast4 = (last4, cards = []) =>
+        cards.find((c) => c.last4 === last4) || null;
+
+      const findCardByPaymentSource = (src, cards = []) => {
+        const s = norm(src);
+        if (!s) return null;
+        return cards.find((c) => s.includes(c.last4) || s.includes(norm(c.label))) || null;
+      };
+
+      const panelUserFromCard = (card) => {
+        if (!card) return 'personA';
+        if (card.owner === 'personB') return 'personB';
+        return 'personA';
+      };
+
+      const defaultCardForPanel = (panel, cfg) => {
+        const cards = cfg?.cards || [];
+        const match = cards.find((c) => c.owner === panel)
+          || cards.find((c) => c.owner === 'personA')
+          || cards[0];
+        return match ? cardDisplaySource(match) : 'Cartão';
+      };
+
+      const isSplitPersonA = (split, cfg) => {
+        const s = norm(split);
+        return s === norm(nameA(cfg)) || s === 'persona' || split === 'personA';
+      };
+
+      const isSplitPersonB = (split, cfg) => {
+        const s = norm(split);
+        return s === norm(nameB(cfg)) || s === 'personb' || split === 'personB';
+      };
+
+      const isPaidByPersonA = (paidBy, cfg) =>
+        paidBy === 'personA' || norm(paidBy) === norm(nameA(cfg));
+
+      const isPaidByPersonB = (paidBy, cfg) =>
+        paidBy === 'personB' || norm(paidBy) === norm(nameB(cfg));
+
       /* ========= Helpers ========= */
       const norm = (s) => 
         String(s || "")
@@ -86,27 +156,30 @@
           .trim()
           .toLowerCase();
 
-      const canonicalSplit = (s) => {
+      const canonicalSplit = (s, cfg) => {
         const n = norm(s);
-        if (n.includes('guilherme')) return 'Guilherme';
-        if (n.includes('thais')) return 'Thais';
+        if (cfg && n === norm(nameA(cfg))) return nameA(cfg);
+        if (cfg && n === norm(nameB(cfg))) return nameB(cfg);
         return 'Dividido';
       };
 
-      const uiOwner = (e) => {
-        const s = norm(e.split);
-        if (s === "guilherme" || s === "thais") return s;
+      const uiOwner = (e, cfg) => {
+        if (cfg) {
+          if (isSplitPersonA(e.split, cfg)) return 'persona';
+          if (isSplitPersonB(e.split, cfg)) return 'personb';
+        }
         const who = norm(e.paidBy || e.owner || e.user || e.person || e.responsavel);
-        if (who === "guilherme" || who === "thais") return who;
-        return "dividido";
+        if (who === 'persona' || (cfg && who === norm(nameA(cfg)))) return 'persona';
+        if (who === 'personb' || (cfg && who === norm(nameB(cfg)))) return 'personb';
+        return 'dividido';
       };
 
-      const stripeBySplit = (e) => {
-        const owner = uiOwner(e);
+      const stripeBySplit = (e, cfg) => {
+        const owner = uiOwner(e, cfg);
         const base = "before:content-[''] before:absolute before:left-0 before:top-2 before:bottom-2 before:w-1.5 before:rounded-full";
-        if (owner === "guilherme") return base + " before:bg-indigo-500";
-        if (owner === "thais")      return base + " before:bg-pink-500";
-        return "";
+        if (owner === 'persona') return base + ' before:bg-indigo-500';
+        if (owner === 'personb') return base + ' before:bg-pink-500';
+        return '';
       };
 
       const shouldIgnorePaymentInclusion = (row, chosenDesc) => {
@@ -343,7 +416,8 @@
         return { isInstallment: false };
       }
 
-      const last4FromRow = (row = []) => {
+      const last4FromRow = (row = [], cards = []) => {
+        const knownLast4 = new Set((cards || []).map((c) => c.last4));
         for (const cell of row) {
           const raw = String(cell ?? '');
           const s = raw.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
@@ -351,9 +425,9 @@
           if (m) return m[1];
           m = s.match(/(?:\*{2,}|x{3,}|xxxx)\s*(\d{4})\b/);
           if (m) return m[1];
-          if (/\b2581\b/.test(s)) return '2581';
-          if (/\b1009\b/.test(s)) return '1009';
-          if (/\b7292\b/.test(s)) return '7292';
+          for (const l4 of knownLast4) {
+            if (s.includes(l4)) return l4;
+          }
           m = s.match(/\b(?!20\d{2}\b)(\d{4})\b/);
           if (m) return m[1];
         }
@@ -429,13 +503,12 @@
         return monthKeyFromDateObj(d);
       };
 
-      const ownerFromPaymentSource = (src) => {
-        const s = norm(src);
-        if (!s) return null;
-        if (s.includes('2581') || s.includes('guilherme')) return 'Guilherme';
-        if (s.includes('1009') || s.includes('thais')) return 'Thais';
-        if (s.includes('7292') || s.includes('digital')) return 'Ambos';
-        return null;
+      const ownerFromPaymentSource = (src, cards = []) => {
+        const card = findCardByPaymentSource(src, cards);
+        if (!card) return null;
+        if (card.owner === 'both') return 'both';
+        if (card.owner === 'personB') return 'personB';
+        return 'personA';
       };
 
       // --- DETECÇÃO DE COLUNAS (Flexível) ---
@@ -585,27 +658,290 @@
         );
       };
 
-      const UserSelectionScreen = ({ onSelectUser }) => (
-        <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
-          <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
-          <p className="text-lg text-slate-600 dark:text-slate-400 mb-8">Quem está a usar?</p>
-          <div className="space-y-4 w-full max-w-xs">
-            {['Guilherme', 'Thais'].map(u => (
-              <button key={u} onClick={() => onSelectUser(u)}
-                className={`w-full py-3 rounded-xl text-white font-semibold shadow-lg hover:brightness-110 transition-all hover:scale-105  
-                ${u === 'Thais' ? 'bg-pink-600' : 'bg-indigo-600'}`}>
-                {u}
+      const SetupWizard = ({ onComplete, existingConfig, initialStep }) => {
+        const [step, setStep] = useState(initialStep || (existingConfig?.setupComplete ? 'select' : 'welcome'));
+        const [mode, setMode] = useState('create');
+        const [joinCode, setJoinCode] = useState('');
+        const [personAName, setPersonAName] = useState(existingConfig ? nameA(existingConfig) : '');
+        const [personBName, setPersonBName] = useState(existingConfig ? nameB(existingConfig) : '');
+        const [cards, setCards] = useState(existingConfig?.cards?.length ? existingConfig.cards : []);
+        const [householdId, setHouseholdId] = useState(existingConfig?.householdId || '');
+        const [copied, setCopied] = useState(false);
+
+        const addCard = () => {
+          setCards((prev) => [...prev, { id: generateId(), label: '', last4: '', owner: 'personA' }]);
+        };
+
+        const updateCard = (id, field, value) => {
+          setCards((prev) => prev.map((c) => c.id === id ? { ...c, [field]: value } : c));
+        };
+
+        const removeCard = (id) => {
+          setCards((prev) => prev.filter((c) => c.id !== id));
+        };
+
+        const validNames = personAName.trim() && personBName.trim()
+          && norm(personAName) !== norm(personBName);
+
+        const validCards = cards.every((c) =>
+          c.label.trim() && /^\d{4}$/.test(String(c.last4 || '').trim())
+        );
+
+        const finishConfig = () => {
+          const hid = mode === 'join' && joinCode.trim()
+            ? joinCode.trim()
+            : (householdId || generateId());
+          const cfg = {
+            householdId: hid,
+            personA: { name: personAName.trim() },
+            personB: { name: personBName.trim() },
+            cards: cards.map((c) => ({
+              id: c.id || generateId(),
+              label: c.label.trim(),
+              last4: String(c.last4).trim(),
+              owner: c.owner || 'personA',
+            })),
+            setupComplete: true,
+          };
+          saveAppConfig(cfg);
+          setHouseholdId(hid);
+          onComplete(cfg);
+          setStep('select');
+        };
+
+        const copyCode = async () => {
+          try {
+            await navigator.clipboard.writeText(householdId || existingConfig?.householdId || '');
+            setCopied(true);
+            setTimeout(() => setCopied(false), 2000);
+          } catch {}
+        };
+
+        if (step === 'welcome') {
+          return (
+            <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+              <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
+              <p className="text-lg text-slate-600 dark:text-slate-400 mb-8 text-center">Configure seu acerto financeiro a dois</p>
+              <div className="space-y-3 w-full max-w-xs">
+                <button onClick={() => { setMode('create'); setStep('names'); }}
+                  className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold shadow-lg hover:brightness-110">
+                  Criar nova família
+                </button>
+                <button onClick={() => { setMode('join'); setStep('join'); }}
+                  className="w-full py-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-semibold hover:bg-slate-50 dark:hover:bg-slate-700">
+                  Entrar com código da família
+                </button>
+              </div>
+            </div>
+          );
+        }
+
+        if (step === 'join') {
+          return (
+            <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+              <h1 className="text-2xl font-bold mb-2 text-slate-800 dark:text-white">Código da família</h1>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mb-6 text-center max-w-sm">
+                Cole o código que a outra pessoa copiou na configuração inicial.
+              </p>
+              <input className={ui.input + ' max-w-sm mb-4'} placeholder="UUID da família"
+                value={joinCode} onChange={(e) => setJoinCode(e.target.value)} />
+              <button disabled={!joinCode.trim()} onClick={() => { setHouseholdId(joinCode.trim()); setStep('names'); }}
+                className="w-full max-w-sm py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
+                Continuar
               </button>
-            ))}
+              <button onClick={() => setStep('welcome')} className="mt-4 text-sm text-slate-500 hover:text-slate-700">Voltar</button>
+            </div>
+          );
+        }
+
+        if (step === 'names') {
+          return (
+            <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+              <h1 className="text-2xl font-bold mb-2 text-slate-800 dark:text-white">Nomes</h1>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mb-6 text-center">Quem são as duas pessoas?</p>
+              <div className="w-full max-w-sm space-y-4">
+                <div>
+                  <label className={ui.label}>Pessoa 1 (paga faturas de cartão)</label>
+                  <input className={ui.input} placeholder="Ex: João" value={personAName} onChange={(e) => setPersonAName(e.target.value)} />
+                </div>
+                <div>
+                  <label className={ui.label}>Pessoa 2</label>
+                  <input className={ui.input} placeholder="Ex: Maria" value={personBName} onChange={(e) => setPersonBName(e.target.value)} />
+                </div>
+                <button disabled={!validNames} onClick={() => setStep('cards')}
+                  className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
+                  Continuar
+                </button>
+                {!existingConfig?.setupComplete && (
+                  <button onClick={() => setStep(mode === 'join' ? 'join' : 'welcome')} className="w-full text-sm text-slate-500">Voltar</button>
+                )}
+              </div>
+            </div>
+          );
+        }
+
+        if (step === 'cards') {
+          return (
+            <div className="min-h-screen flex flex-col p-6 bg-slate-50 dark:bg-slate-900 max-w-lg mx-auto">
+              <h1 className="text-2xl font-bold mb-2 text-slate-800 dark:text-white">Cartões</h1>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">Adicione quantos cartões quiser e indique o dono de cada um.</p>
+              <div className="space-y-3 flex-1 overflow-y-auto mb-4">
+                {cards.map((c) => (
+                  <div key={c.id} className="bg-white dark:bg-slate-800 p-3 rounded-xl space-y-2 shadow-sm">
+                    <input className={ui.input} placeholder="Nome do cartão" value={c.label}
+                      onChange={(e) => updateCard(c.id, 'label', e.target.value)} />
+                    <div className="grid grid-cols-2 gap-2">
+                      <input className={ui.input} placeholder="Final 1234" maxLength={4} value={c.last4}
+                        onChange={(e) => updateCard(c.id, 'last4', e.target.value.replace(/\D/g, '').slice(0, 4))} />
+                      <select className={ui.select} value={c.owner} onChange={(e) => updateCard(c.id, 'owner', e.target.value)}>
+                        <option value="personA">{personAName || 'Pessoa 1'}</option>
+                        <option value="personB">{personBName || 'Pessoa 2'}</option>
+                        <option value="both">Ambos</option>
+                      </select>
+                    </div>
+                    <button onClick={() => removeCard(c.id)} className="text-xs text-red-500 hover:text-red-700">Remover</button>
+                  </div>
+                ))}
+                <button onClick={addCard} className="w-full py-2 rounded-xl border-2 border-dashed border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-400 hover:border-indigo-400">
+                  + Adicionar cartão
+                </button>
+              </div>
+              <button disabled={cards.length > 0 && !validCards} onClick={() => {
+                if (mode === 'create' && !householdId) setHouseholdId(generateId());
+                if (mode === 'join') finishConfig();
+                else setStep('household');
+              }} className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
+                {mode === 'join' ? 'Salvar e continuar' : 'Continuar'}
+              </button>
+              <button onClick={() => setStep('names')} className="mt-2 text-sm text-slate-500">Voltar</button>
+            </div>
+          );
+        }
+
+        if (step === 'household') {
+          return (
+            <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+              <h1 className="text-2xl font-bold mb-2 text-slate-800 dark:text-white">Código da família</h1>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mb-4 text-center max-w-sm">
+                Compartilhe este código com a outra pessoa para sincronizar os lançamentos.
+              </p>
+              <div className="bg-white dark:bg-slate-800 p-4 rounded-xl max-w-sm w-full mb-4 break-all text-xs font-mono text-slate-700 dark:text-slate-200">
+                {householdId}
+              </div>
+              <button onClick={copyCode} className="w-full max-w-sm py-2 rounded-xl bg-slate-200 dark:bg-slate-700 text-slate-700 dark:text-slate-200 font-medium mb-4">
+                {copied ? 'Copiado!' : 'Copiar código'}
+              </button>
+              <button onClick={finishConfig} className="w-full max-w-sm py-3 rounded-xl bg-indigo-600 text-white font-semibold">
+                Continuar
+              </button>
+            </div>
+          );
+        }
+
+        // step === 'select'
+        const cfg = existingConfig || loadAppConfig();
+        return (
+          <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+            <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
+            <p className="text-lg text-slate-600 dark:text-slate-400 mb-8">Quem está a usar?</p>
+            <div className="space-y-4 w-full max-w-xs">
+              <button onClick={() => onComplete(cfg, 'personA')}
+                className="w-full py-3 rounded-xl text-white font-semibold shadow-lg hover:brightness-110 bg-indigo-600">
+                {nameA(cfg)}
+              </button>
+              <button onClick={() => onComplete(cfg, 'personB')}
+                className="w-full py-3 rounded-xl text-white font-semibold shadow-lg hover:brightness-110 bg-pink-600">
+                {nameB(cfg)}
+              </button>
+            </div>
+            <button onClick={() => setStep('names')} className="mt-8 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+              Configurações
+            </button>
           </div>
-        </div>
-      );
+        );
+      };
+
+      const SettingsModal = ({ isOpen, onClose, config, onSave }) => {
+        const [personAName, setPersonAName] = useState(nameA(config));
+        const [personBName, setPersonBName] = useState(nameB(config));
+        const [cards, setCards] = useState(config?.cards || []);
+
+        useEffect(() => {
+          if (isOpen && config) {
+            setPersonAName(nameA(config));
+            setPersonBName(nameB(config));
+            setCards(config.cards || []);
+          }
+        }, [isOpen, config]);
+
+        if (!isOpen) return null;
+
+        const addCard = () => setCards((p) => [...p, { id: generateId(), label: '', last4: '', owner: 'personA' }]);
+        const updateCard = (id, field, value) => setCards((p) => p.map((c) => c.id === id ? { ...c, [field]: value } : c));
+        const removeCard = (id) => setCards((p) => p.filter((c) => c.id !== id));
+
+        const handleSave = () => {
+          const updated = {
+            ...config,
+            personA: { name: personAName.trim() },
+            personB: { name: personBName.trim() },
+            cards: cards.map((c) => ({
+              id: c.id || generateId(),
+              label: c.label.trim(),
+              last4: String(c.last4).trim(),
+              owner: c.owner || 'personA',
+            })),
+          };
+          saveAppConfig(updated);
+          onSave(updated);
+          onClose();
+        };
+
+        return (
+          <Modal isOpen={isOpen} onClose={onClose}>
+            <h3 className="text-lg font-semibold mb-4">Configurações</h3>
+            <div className="space-y-3 max-h-[60vh] overflow-y-auto">
+              <div>
+                <label className={ui.label}>Pessoa 1</label>
+                <input className={ui.input} value={personAName} onChange={(e) => setPersonAName(e.target.value)} />
+              </div>
+              <div>
+                <label className={ui.label}>Pessoa 2</label>
+                <input className={ui.input} value={personBName} onChange={(e) => setPersonBName(e.target.value)} />
+              </div>
+              <p className="text-xs text-slate-500">Código da família: <span className="font-mono break-all">{config.householdId}</span></p>
+              <p className="text-sm font-medium mt-2">Cartões</p>
+              {cards.map((c) => (
+                <div key={c.id} className="border border-slate-200 dark:border-slate-700 p-2 rounded-lg space-y-2">
+                  <input className={ui.input} placeholder="Nome" value={c.label} onChange={(e) => updateCard(c.id, 'label', e.target.value)} />
+                  <div className="grid grid-cols-2 gap-2">
+                    <input className={ui.input} placeholder="Final" maxLength={4} value={c.last4}
+                      onChange={(e) => updateCard(c.id, 'last4', e.target.value.replace(/\D/g, '').slice(0, 4))} />
+                    <select className={ui.select} value={c.owner} onChange={(e) => updateCard(c.id, 'owner', e.target.value)}>
+                      <option value="personA">{personAName || 'Pessoa 1'}</option>
+                      <option value="personB">{personBName || 'Pessoa 2'}</option>
+                      <option value="both">Ambos</option>
+                    </select>
+                  </div>
+                  <button onClick={() => removeCard(c.id)} className="text-xs text-red-500">Remover</button>
+                </div>
+              ))}
+              <button onClick={addCard} className="text-sm text-indigo-600">+ Adicionar cartão</button>
+            </div>
+            <div className="mt-4 flex justify-end gap-2">
+              <button className={ui.btnGhost} onClick={onClose}>Cancelar</button>
+              <button className={ui.btnPrimary} onClick={handleSave}>Salvar</button>
+            </div>
+          </Modal>
+        );
+      };
 
       /* ========= Dashboard ========= */
-      const Dashboard = ({ user, onLogout, db }) => {
+      const Dashboard = ({ activePanel, config, onLogout, onConfigChange, db, householdId }) => {
         const [expenses, setExpenses] = useState([]);
         const [installmentPlans, setInstallmentPlans] = useState([]);
         const [monthsFromDb, setMonthsFromDb] = useState([]);
+        const [isSettingsOpen, setIsSettingsOpen] = useState(false);
 
         const [currentMonth, setCurrentMonth] = useState(() => currentMonthKey());
 
@@ -644,52 +980,56 @@
         const [fData, setFData] = useState(() => new Date().toLocaleDateString('pt-PT', { timeZone: 'UTC' }));
         const [fTipo, setFTipo] = useState('Cartão');
         const [fSplit, setFSplit] = useState('Dividido');
-        const [fFonte, setFFonte] = useState(user === 'Guilherme' ? 'Cartão Guilherme (final 2581)' : 'Cartão Thais (final 1009)');
+        const [fFonte, setFFonte] = useState(() => defaultCardForPanel(activePanel, config));
         const [fParcela, setFParcela] = useState('');
         const [salvando, setSalvando] = useState(false);
         const [editingId, setEditingId] = useState(null);
 
         const fb = window.FirebaseLib;
-        if (!fb) return null; // Safety check for render
+        if (!fb) return null;
 
         const { collection, doc, addDoc, updateDoc, deleteDoc, onSnapshot, runTransaction, writeBatch, query, where } = fb;
 
-        const theme = user === 'Thais'   
+        const theme = activePanel === 'personB'
           ? { text:'text-pink-600 dark:text-pink-400', bg:'bg-pink-600', hover:'hover:bg-pink-700' }
           : { text:'text-indigo-600 dark:text-indigo-400', bg:'bg-indigo-600', hover:'hover:bg-indigo-700' };
 
+        const displayName = activePanel === 'personB' ? nameB(config) : nameA(config);
+
         // Listeners
         useEffect(() => {
-          if (!db || !fb) return;
+          if (!db || !fb || !householdId) return;
           const plansRef = collection(db, 'installmentPlans');
-          const unsub = onSnapshot(plansRef, (s) => setInstallmentPlans(s.docs.map(d => ({ id: d.id, ...d.data() }))));
+          const q = query(plansRef, where('householdId', '==', householdId));
+          const unsub = onSnapshot(q, (s) => setInstallmentPlans(s.docs.map(d => ({ id: d.id, ...d.data() }))));
           return () => unsub();
-        }, [db]);
+        }, [db, householdId]);
 
         useEffect(() => {
-          if (!db || !fb) return;
+          if (!db || !fb || !householdId) return;
           const expRef = collection(db, 'expenses');
-          const unsub = onSnapshot(expRef, (s) => {
+          const q = query(expRef, where('householdId', '==', householdId));
+          const unsub = onSnapshot(q, (s) => {
              const set = new Set();
              s.forEach(d => { const mk = d.data().monthKey; if(mk) set.add(mk); });
              setMonthsFromDb(Array.from(set).sort());
           });
           return () => unsub();
-        }, [db]);
+        }, [db, householdId]);
 
         useEffect(() => {
-          if (!db || !currentMonth || !fb) return;
+          if (!db || !currentMonth || !fb || !householdId) return;
           const expRef = collection(db, 'expenses');
-          const q = query(expRef, where('monthKey', '==', currentMonth));
+          const q = query(expRef, where('householdId', '==', householdId), where('monthKey', '==', currentMonth));
           const unsub = onSnapshot(q, (s) => {
               setExpenses(s.docs.map(d => ({ id: d.id, ...d.data() })));
           });
           return () => unsub();
-        }, [db, currentMonth]);
+        }, [db, currentMonth, householdId]);
 
         // Geração Parcelas
         useEffect(() => {
-          if (!installmentPlans.length || !db || !fb) return;
+          if (!installmentPlans.length || !db || !fb || !householdId) return;
           const generate = async () => {
              const expCol = collection(db, 'expenses');
              const batch = writeBatch(db);
@@ -708,16 +1048,20 @@
                      const mk = monthKeyFromDateObj(d);
                      const dateStr = d.toLocaleDateString('pt-PT', { timeZone: 'UTC' });
                      const amount = (i+1) === plan.numberOfInstallments ? last : per;
-                     const qDup = query(expCol, where('installmentPlanId','==', plan.id), where('parcela','==', parcelaKey), where('monthKey','==', mk));
+                     const qDup = query(expCol,
+                       where('householdId','==', householdId),
+                       where('installmentPlanId','==', plan.id),
+                       where('parcela','==', parcelaKey),
+                       where('monthKey','==', mk));
                      const snap = await window.FirebaseLib.getDocs(qDup);
                      if (snap.empty) {
                          const newRef = doc(expCol);
                          batch.set(newRef, {
+                             householdId,
                              installmentPlanId: plan.id, description: plan.description, amount,
                              date: dateStr, parcela: parcelaKey, split: plan.split || 'Dividido',
                              type: plan.type || 'Cartão', paymentSource: plan.paymentSource || 'Cartão',
                              paidBy: 'Cartão', monthKey: mk,
-                             // Auto-generated installments are marked as such
                              isInstallment: true,
                              installmentCurrent: i+1,
                              installmentTotal: plan.numberOfInstallments
@@ -729,7 +1073,7 @@
              if (hasWrites) await batch.commit();
           };
           generate();
-        }, [installmentPlans, db]);
+        }, [installmentPlans, db, householdId]);
 
         /* ==== Derivados ==== */
         const availableMonths = useMemo(() => {
@@ -749,10 +1093,10 @@
 
         const visibleExpensesForScope = useMemo(() => {
           return expensesForScope.filter(e => {
-            if (!e.panelUser) return true; // docs antigos aparecem pra ambos
-            return e.panelUser === user;
+            if (!e.panelUser) return true;
+            return e.panelUser === activePanel;
           });
-        }, [expensesForScope, user]);
+        }, [expensesForScope, activePanel]);
 
         const filteredList = useMemo(() => {
           let base = visibleExpensesForScope;
@@ -777,24 +1121,20 @@
           for (const e of expensesForScope) {
             const val = Number(e.amount || 0);
 
-            // 🌎 PARTE JUSTA (quanto cada um "gastou" nesse lançamento)
             if (e.split === 'Dividido') {
               pG += val / 2;
               pT += val / 2;
-            } else if (e.split === 'Guilherme') {
+            } else if (isSplitPersonA(e.split, config)) {
               pG += val;
-            } else if (e.split === 'Thais') {
+            } else if (isSplitPersonB(e.split, config)) {
               pT += val;
             }
 
-            // 💸 QUEM PAGOU DE FATO
             if (e.type === 'Cartão') {
-              // Regra da vida real: Guilherme paga 100% de TODAS as faturas
               paidG += val;
             } else {
-              // Pix / Boleto / Ajuste usam o campo paidBy
-              if (e.paidBy === 'Guilherme') paidG += val;
-              else if (e.paidBy === 'Thais') paidT += val;
+              if (isPaidByPersonA(e.paidBy, config)) paidG += val;
+              else if (isPaidByPersonB(e.paidBy, config)) paidT += val;
             }
           }
 
@@ -804,56 +1144,51 @@
             gPaid: round2(paidG),
             tPaid: round2(paidT),
           };
-        }, [expensesForScope]);
+        }, [expensesForScope, config]);
 
         const difGastos = round2(partG - partT);
-        const valorDevolverSePagarTudo = user === 'Guilherme' ? round2(gPaid - partG) : round2(tPaid - partT);
+        const valorDevolverSePagarTudo = activePanel === 'personA'
+          ? round2(gPaid - partG)
+          : round2(tPaid - partT);
 
-        // --- SALDO DEVEDOR (AGORA RESPEITA O FILTRO scope) ---
-        const saldoDevedorThais = useMemo(() => {
-          let pG = 0;    // parte justa do Guilherme dentro do escopo atual
-          let paidG = 0; // quanto Guilherme realmente pagou dentro do escopo atual
+        const saldoDevedor = useMemo(() => {
+          let pG = 0;
+          let paidG = 0;
 
           for (const e of expensesForScope) {
             const val = Number(e.amount || 0);
 
-            // 🌎 PARTE JUSTA DO GUILHERME (em qualquer tipo)
             if (e.split === 'Dividido') {
               pG += val / 2;
-            } else if (e.split === 'Guilherme') {
+            } else if (isSplitPersonA(e.split, config)) {
               pG += val;
-            } // se split = Thais, parte do Gui é 0
+            }
 
-            // 💸 QUANTO O GUILHERME PAGOU MESMO
             if (e.type === "Cartão") {
-              // Você paga 100% de todas as faturas (todos os cartões)
               paidG += val;
             } else {
-              // Pix / Boleto / Ajuste
-              if (e.paidBy === "Guilherme") {
+              if (isPaidByPersonA(e.paidBy, config)) {
                 paidG += val;
               }
             }
           }
 
-          // Se paidG > pG, Guilherme pagou mais do que devia -> Thais deve
-          // Se paidG < pG, Thais pagou mais (ou Ajustes compensaram) -> saldo diminui
           return round2(paidG - pG);
-        }, [expensesForScope]);
+        }, [expensesForScope, config]);
 
         const cardTotals = useMemo(() => {
-          let tot=0, g=0, t=0, d=0;
+          let tot = 0;
+          const perCard = {};
+          (config.cards || []).forEach((c) => { perCard[c.id] = 0; });
           for (const e of expenses) {
               if (e.type !== 'Cartão') continue;
               const val = Number(e.amount||0);
-              tot+=val;
-              const o = ownerFromPaymentSource(e.paymentSource);
-              if (o === 'Guilherme') g+=val;
-              else if (o === 'Thais') t+=val;
-              else if (o === 'Ambos') d+=val;
+              tot += val;
+              const card = findCardByPaymentSource(e.paymentSource, config.cards);
+              if (card) perCard[card.id] = (perCard[card.id] || 0) + val;
           }
-          return { grandTotal: round2(tot), gCard: round2(g), tCard: round2(t), dCard: round2(d) };
-        }, [expenses]);
+          return { grandTotal: round2(tot), perCard };
+        }, [expenses, config.cards]);
 
         // Valor que "some" da fatura no mês seguinte (parcelas que terminam neste mês)
         const freedNextInvoice = useMemo(() => {
@@ -885,19 +1220,18 @@
 
             // Que parte é do Gui e da Thais
             if (e.type === "Cartão") {
-              const owner = ownerFromPaymentSource(e.paymentSource);
-              if (owner === "Guilherme") {
+              const owner = ownerFromPaymentSource(e.paymentSource, config.cards);
+              if (owner === "personA") {
                 totalG += val;
-              } else if (owner === "Thais") {
+              } else if (owner === "personB") {
                 totalT += val;
-              } else if (owner === "Ambos") {
+              } else if (owner === "both") {
                 totalG += val / 2;
                 totalT += val / 2;
               }
             } else {
-              // Parcelados em Pix/Boleto (se algum dia aparecer)
-              if (e.paidBy === "Guilherme") totalG += val;
-              else if (e.paidBy === "Thais") totalT += val;
+              if (isPaidByPersonA(e.paidBy, config)) totalG += val;
+              else if (isPaidByPersonB(e.paidBy, config)) totalT += val;
             }
           }
 
@@ -907,7 +1241,7 @@
             totalG: round2(totalG),
             totalT: round2(totalT),
           };
-        }, [expenses]);
+        }, [expenses, config]);
 
         // --- HELPER DE ESTILO DE PARCELA ---
         const isLastInstallment = (e) => {
@@ -958,40 +1292,32 @@
 
           const expCol = collection(db, 'expenses');
 
-          // 🔹 Definir de quem é esse lançamento (painel)
-          let panelUser = user; // padrão: quem está logado
+          let panelUserVal = activePanel;
 
           if (fTipo === 'Cartão') {
-              const s = norm(fFonte);
-              if (s.includes('1009')) {
-                  panelUser = 'Thais';
-              } else if (s.includes('2581') || s.includes('7292')) {
-                  panelUser = 'Guilherme'; // cartão Guilherme + digital ficam no painel do Gui
-              }
+              const card = findCardByPaymentSource(fFonte, config.cards);
+              panelUserVal = panelUserFromCard(card);
           } else {
-              // Pix / Boleto / Ajuste: fica no painel de quem está usando
-              if (user === 'Guilherme' || user === 'Thais') {
-                  panelUser = user;
-              }
+              panelUserVal = activePanel;
           }
 
-          // Detecta se é parcela digitada no campo
           const instObj = parseInstallmentFromCell(fParcela);
 
           const payload = {
+              householdId,
               description: fDesc,
               amount: val,
               date: fData,
-              split: fTipo === 'Ajuste' ? 'Guilherme' : fSplit,
+              split: fTipo === 'Ajuste' ? nameA(config) : fSplit,
               type: fTipo,
               paymentSource: fTipo === 'Cartão' ? fFonte : fTipo,
-              paidBy: fTipo === 'Cartão' ? 'Cartão' : (fTipo === 'Ajuste' ? 'Thais' : user),
+              paidBy: fTipo === 'Cartão' ? 'Cartão' : (fTipo === 'Ajuste' ? 'personB' : activePanel),
               monthKey: mk,
               parcela: instObj.isInstallment ? instObj.info : null,
               isInstallment: instObj.isInstallment,
               installmentCurrent: instObj.current,
               installmentTotal: instObj.total,
-              panelUser, // 🔹 novo campo
+              panelUser: panelUserVal,
           };
 
           // Remove campos undefined
@@ -1029,7 +1355,7 @@
             setFData(e.date || new Date().toLocaleDateString('pt-PT', { timeZone: 'UTC' }));
             setFTipo(e.type || 'Cartão');
             setFSplit(e.split || 'Dividido');
-            setFFonte(e.paymentSource || (user === 'Guilherme' ? 'Cartão Guilherme (final 2581)' : 'Cartão Thais (final 1009)'));
+            setFFonte(e.paymentSource || defaultCardForPanel(activePanel, config));
             setFParcela(e.parcela || '');
             setIsAddOpen(true);
         };
@@ -1094,34 +1420,25 @@
                   // --- PARCELA: detecta usando a linha inteira, dando prioridade à coluna de parcelas ---
                   const parcelaInfo = detectInstallmentForRow(row, cols);
 
-                  const last4 = last4FromRow(row);
+                  const last4 = last4FromRow(row, config.cards);
                   let source = 'Cartão';
-                  if (last4 === "2581") source = "Cartão Guilherme (final 2581)";
-                  else if (last4 === "1009") source = "Cartão Thais (final 1009)";
-                  else if (last4 === "7292") source = "Cartão Digital (final 7292)";
+                  const matchedCard = findCardByLast4(last4, config.cards);
+                  if (matchedCard) source = cardDisplaySource(matchedCard);
 
-                  // 🔹 De quem é esse lançamento no painel?
-                  let panelUser = 'Guilherme'; // padrão
-                  const sSrc = norm(source);
-                  if (sSrc.includes('1009')) {
-                      panelUser = 'Thais';
-                  } else if (sSrc.includes('2581') || sSrc.includes('7292')) {
-                      panelUser = 'Guilherme';
-                  }
+                  let panelUserVal = 'personA';
+                  if (matchedCard) panelUserVal = panelUserFromCard(matchedCard);
 
                   mapped.push({
-                      description: desc,   
-                      amount: round2(amount), // REMOVIDO Math.abs() para respeitar negativos (estornos)
-                      date: dateStr,   
-                      type: 'Cartão',   
-                      paymentSource: source,   
-                      split: 'Dividido',   
+                      householdId,
+                      description: desc,
+                      amount: round2(amount),
+                      date: dateStr,
+                      type: 'Cartão',
+                      paymentSource: source,
+                      split: 'Dividido',
                       paidBy: 'Cartão',
-
-                      // --- FORÇA O MÊS ATUAL NA IMPORTAÇÃO ---
                       monthKey: currentMonth,
                       originalMonthKey: mk,
-
                       parcela: parcelaInfo.isInstallment ? parcelaInfo.info : null,
                       isInstallment: parcelaInfo.isInstallment,
                       installmentTotal: parcelaInfo.total,
@@ -1129,7 +1446,7 @@
                       installmentPlanId: parcelaInfo.isInstallment
                         ? `${norm(desc)}|${last4 || 'nocard'}|${parcelaInfo.total}`
                         : null,
-                      panelUser, // 🔹 aqui
+                      panelUser: panelUserVal,
                   });
               }
 
@@ -1151,7 +1468,7 @@
           const existingKeys = new Set();
 
           await Promise.all(monthsInFile.map(async (mk) => {
-              const q = query(expRef, where('monthKey', '==', mk));
+              const q = query(expRef, where('householdId', '==', householdId), where('monthKey', '==', mk));
               const snap = await window.FirebaseLib.getDocs(q);
               snap.forEach(doc => {
                   const e = doc.data();
@@ -1208,9 +1525,10 @@
           try {
               const expRef = collection(db, 'expenses');
               const q = query(
-                  expRef,   
+                  expRef,
+                  where('householdId', '==', householdId),
                   where('monthKey','==', currentMonth),
-                  where('panelUser', '==', user) // 🔹 só do painel atual
+                  where('panelUser', '==', activePanel)
               );
               const snap = await window.FirebaseLib.getDocs(q);
               const batch = writeBatch(db);
@@ -1222,7 +1540,7 @@
 
         const clearAll = async () => {
            try {
-               const q = query(collection(db, 'expenses'));
+               const q = query(collection(db, 'expenses'), where('householdId', '==', householdId));
                const snap = await window.FirebaseLib.getDocs(q);
                const batch = writeBatch(db);
                snap.forEach(d => batch.delete(d.ref));
@@ -1233,7 +1551,7 @@
 
         // Abas visíveis conforme o usuário
         const tabsForUser =
-          user === 'Thais'
+          activePanel === 'personB'
             ? ['Todos', 'Cartão', 'Pix', 'Boleto', 'Ajuste', 'Parcelado']
             : ['Todos', 'Cartão', 'Pix', 'Boleto', 'Parcelado'];
 
@@ -1242,7 +1560,7 @@
           <div className="min-h-screen flex flex-col pb-12 bg-slate-50 dark:bg-slate-900">
               <header className="bg-white dark:bg-slate-800 shadow-sm px-4 py-3 flex justify-between items-center sticky top-0 z-10">
                   <div className="flex items-center gap-2">
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold ${theme.bg}`}>{user[0]}</div>
+                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center text-white font-bold ${theme.bg}`}>{displayName[0]}</div>
                       <div><h1 className="font-bold text-sm sm:text-base text-slate-900 dark:text-slate-100">Meu Acerto</h1><p className="text-xs text-slate-500 dark:text-slate-400">Mês: {monthLabel(currentMonth)}</p></div>
                   </div>
                   <div className="flex items-center gap-2">
@@ -1262,6 +1580,9 @@
                           </button>
                         ))}
                       </div>
+                     <button onClick={() => setIsSettingsOpen(true)} className="p-2 bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300" title="Configurações">
+                         <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" /><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" /></svg>
+                     </button>
                      <button onClick={onLogout} className="p-2 bg-slate-100 dark:bg-slate-700 rounded-lg hover:bg-slate-200 dark:hover:bg-slate-600 text-slate-600 dark:text-slate-300">
                          <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" /></svg>
                      </button>
@@ -1282,22 +1603,22 @@
                   <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
                       <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm">
                           <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">Divisão ({scope})</p>
-                          <div className="flex justify-between items-end mb-1"><span className="text-sm text-slate-700 dark:text-slate-200">Guilherme</span><span className="font-bold text-slate-900 dark:text-slate-100">{formatBRL(partG)}</span></div>
-                          <div className="flex justify-between items-end"><span className="text-sm text-slate-700 dark:text-slate-200">Thais</span><span className="font-bold text-slate-900 dark:text-slate-100">{formatBRL(partT)}</span></div>
+                          <div className="flex justify-between items-end mb-1"><span className="text-sm text-slate-700 dark:text-slate-200">{nameA(config)}</span><span className="font-bold text-slate-900 dark:text-slate-100">{formatBRL(partG)}</span></div>
+                          <div className="flex justify-between items-end"><span className="text-sm text-slate-700 dark:text-slate-200">{nameB(config)}</span><span className="font-bold text-slate-900 dark:text-slate-100">{formatBRL(partT)}</span></div>
                           <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-700 flex justify-between text-xs text-slate-500 dark:text-slate-400"><span>Diferença</span><span className="font-semibold text-slate-700 dark:text-slate-300">{formatBRL(difGastos)}</span></div>
                       </div>
                       <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm">
                           <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">Pagamentos ({scope})</p>
-                          <div className="flex justify-between items-end mb-1"><span className="text-sm text-slate-700 dark:text-slate-200">Guilherme</span><span className="font-bold text-emerald-600 dark:text-emerald-400">{formatBRL(gPaid)}</span></div>
-                          <div className="flex justify-between items-end"><span className="text-sm text-slate-700 dark:text-slate-200">Thais</span><span className="font-bold text-emerald-600 dark:text-emerald-400">{formatBRL(tPaid)}</span></div>
-                          <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">Se {user} quitar tudo: <span className="font-semibold text-slate-700 dark:text-slate-300">{formatBRL(valorDevolverSePagarTudo)}</span></div>
+                          <div className="flex justify-between items-end mb-1"><span className="text-sm text-slate-700 dark:text-slate-200">{nameA(config)}</span><span className="font-bold text-emerald-600 dark:text-emerald-400">{formatBRL(gPaid)}</span></div>
+                          <div className="flex justify-between items-end"><span className="text-sm text-slate-700 dark:text-slate-200">{nameB(config)}</span><span className="font-bold text-emerald-600 dark:text-emerald-400">{formatBRL(tPaid)}</span></div>
+                          <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-700 text-xs text-slate-500 dark:text-slate-400">Se {displayName} quitar tudo: <span className="font-semibold text-slate-700 dark:text-slate-300">{formatBRL(valorDevolverSePagarTudo)}</span></div>
                       </div>
                       <div className="bg-white dark:bg-slate-800 p-4 rounded-2xl shadow-sm relative overflow-hidden">
                           <div className="absolute top-0 right-0 w-16 h-16 bg-indigo-50 dark:bg-indigo-900/20 rounded-bl-full -mr-4 -mt-4"></div>
                           <p className="text-xs text-slate-500 dark:text-slate-400 mb-1">
-                            Saldo ({scope === 'geral' ? 'Geral' : scope === 'cartao' ? 'Cartão' : 'Pix / Boleto'}) (Thais → Gui)
+                            Saldo ({scope === 'geral' ? 'Geral' : scope === 'cartao' ? 'Cartão' : 'Pix / Boleto'}) ({nameB(config)} → {nameA(config)})
                           </p>
-                          <p className={`text-2xl font-extrabold ${saldoDevedorThais > 0 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-500 dark:text-emerald-400'}`}>{formatBRL(saldoDevedorThais)}</p>
+                          <p className={`text-2xl font-extrabold ${saldoDevedor > 0 ? 'text-amber-500 dark:text-amber-400' : 'text-emerald-500 dark:text-emerald-400'}`}>{formatBRL(saldoDevedor)}</p>
                           <p className="text-[10px] text-slate-400 dark:text-slate-500 mt-1">Total faturas: {formatBRL(cardTotals.grandTotal)}</p>
                       </div>
                   </div>
@@ -1318,32 +1639,19 @@
                       </div>
 
                       <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-700 space-y-1 text-xs">
-                      <div className="flex justify-between">
-                          <span className="text-slate-600 dark:text-slate-300"> 
-                          Cartão Thais (final 1009)
+                      {(config.cards || []).length === 0 && (
+                        <p className="text-slate-500 dark:text-slate-400">Nenhum cartão configurado.</p>
+                      )}
+                      {(config.cards || []).map((card) => (
+                      <div key={card.id} className="flex justify-between">
+                          <span className="text-slate-600 dark:text-slate-300">
+                          {cardDisplaySource(card)}
                           </span>
-                          <span className="font-semibold text-slate-900 dark:text-slate-100"> 
-                          {formatBRL(cardTotals.tCard)}
-                          </span>
-                      </div>
-
-                      <div className="flex justify-between">
-                          <span className="text-slate-600 dark:text-slate-300"> 
-                          Cartão Guilherme (final 2581)
-                          </span>
-                          <span className="font-semibold text-slate-900 dark:text-slate-100"> 
-                          {formatBRL(cardTotals.gCard)}
+                          <span className="font-semibold text-slate-900 dark:text-slate-100">
+                          {formatBRL(cardTotals.perCard[card.id] || 0)}
                           </span>
                       </div>
-
-                      <div className="flex justify-between">
-                          <span className="text-slate-600 dark:text-slate-300"> 
-                          Cartão Digital (final 7292)
-                          </span>
-                          <span className="font-semibold text-slate-900 dark:text-slate-100"> 
-                          {formatBRL(cardTotals.dCard)}
-                          </span>
-                      </div>
+                      ))}
                       </div>
                   </div>
 
@@ -1372,8 +1680,8 @@
                         Sua parte:{" "} 
                         <span className="font-semibold"> 
                           {formatBRL(
-                            user === "Guilherme" 
-                              ? freedNextInvoice.totalG 
+                            activePanel === "personA"
+                              ? freedNextInvoice.totalG
                               : freedNextInvoice.totalT
                           )}
                         </span>
@@ -1389,11 +1697,7 @@
                           setFParcela('');
                           setFTipo('Cartão');
                           setFSplit('Dividido');
-                          setFFonte(
-                              user === 'Guilherme'
-                              ? 'Cartão Guilherme (final 2581)'
-                              : 'Cartão Thais (final 1009)'
-                          );
+                          setFFonte(defaultCardForPanel(activePanel, config));
                           setFData(new Date().toLocaleDateString('pt-PT', { timeZone: 'UTC' }));
                           setIsAddOpen(true);
                       }} className={`flex-shrink-0 px-4 py-2 rounded-xl text-white font-semibold shadow ${theme.bg} ${theme.hover}`}>+ Novo</button>
@@ -1424,7 +1728,7 @@
                           {filteredList.map(e => (
                             <div 
                               key={e.id} 
-                              className={`relative p-4 pl-5 flex items-center justify-between bg-white dark:bg-slate-800 rounded-2xl shadow-sm hover:shadow-md transition-all ${stripeBySplit(e)}`}
+                              className={`relative p-4 pl-5 flex items-center justify-between bg-white dark:bg-slate-800 rounded-2xl shadow-sm hover:shadow-md transition-all ${stripeBySplit(e, config)}`}
                             >
                               <div className="flex-1 min-w-0 pr-2">
                                 <div className="flex items-baseline gap-2">
@@ -1509,13 +1813,13 @@
                       <div>
                           <label className={ui.label}>Tipo</label>
                           <select className={ui.select} value={fTipo} onChange={e=>setFTipo(e.target.value)}>
-                              <option>Cartão</option><option>Pix</option><option>Boleto</option><option disabled={user!=='Thais'}>Ajuste</option>
+                              <option>Cartão</option><option>Pix</option><option>Boleto</option><option disabled={activePanel!=='personB'}>Ajuste</option>
                           </select>
                       </div>
                       <div>
                           <label className={ui.label}>Divisão</label>
                           <select className={ui.select} value={fSplit} onChange={e=>setFSplit(e.target.value)} disabled={fTipo==='Ajuste'}>
-                              <option>Dividido</option><option>Guilherme</option><option>Thais</option>
+                              <option>Dividido</option><option>{nameA(config)}</option><option>{nameB(config)}</option>
                           </select>
                       </div>
                   </div>
@@ -1523,9 +1827,10 @@
                       <label className={ui.label}>Cartão / Origem</label>
                       {fTipo==='Cartão' ? (
                           <select className={ui.select} value={fFonte} onChange={e=>setFFonte(e.target.value)}>
-                              <option>Cartão Guilherme (final 2581)</option>
-                              <option>Cartão Thais (final 1009)</option>
-                              <option>Cartão Digital (final 7292)</option>
+                              {(config.cards || []).map((card) => (
+                                <option key={card.id} value={cardDisplaySource(card)}>{cardDisplaySource(card)}</option>
+                              ))}
+                              {(config.cards || []).length === 0 && <option value="Cartão">Cartão</option>}
                           </select>
                       ) : (
                           <input className={ui.input} value={fTipo} disabled />
@@ -1574,6 +1879,13 @@
                       <button onClick={()=>setIsClearOpen(false)} className="w-full py-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 text-xs mt-2">Cancelar</button>
                    </div>
               </Modal>
+
+              <SettingsModal
+                isOpen={isSettingsOpen}
+                onClose={() => setIsSettingsOpen(false)}
+                config={config}
+                onSave={onConfigChange}
+              />
           </div>
         );
       };
@@ -1582,36 +1894,33 @@
       const App = () => {
         const [db, setDb] = useState(null);
         const [authReady, setAuthReady] = useState(false);
-        const [panelUser, setPanelUser] = useState(() => {
+        const [config, setConfig] = useState(() => loadAppConfig());
+        const [activePanel, setActivePanel] = useState(() => {
           try {
-            return localStorage.getItem('panelUser') || null;
+            return localStorage.getItem(PANEL_STORAGE_KEY) || null;
           } catch {
             return null;
           }
         });
+        const [firebaseError, setFirebaseError] = useState(null);
 
         useEffect(() => {
           const fb = window.FirebaseLib;
           if (!fb) return;
 
-          // Evita inicializar o Firebase duas vezes
-          if (!window._meuAcertoApp) {
-            const firebaseConfig = {
-              apiKey: "AIzaSyCeecZ8a4rPnf26IItU-HaaeRpcv5xPTkk",
-              authDomain: "meu-acerto-app.firebaseapp.com",
-              projectId: "meu-acerto-app",
-              storageBucket: "meu-acerto-app.appspot.com",
-              messagingSenderId: "326844075367",
-              appId: "1:326844075367:web:0315e86713b1e0071f33c2"
-            };
+          const firebaseConfig = window.__FIREBASE_CONFIG__;
+          if (!firebaseConfig || !firebaseConfig.apiKey || firebaseConfig.apiKey === 'YOUR_API_KEY') {
+            setFirebaseError('Firebase não configurado. Copie firebase-config.example.js para firebase-config.js ou configure os secrets no GitHub.');
+            return;
+          }
 
+          if (!window._meuAcertoApp) {
             const app = fb.initializeApp(firebaseConfig);
             window._meuAcertoApp = app;
 
             const dbInstance = fb.getFirestore(app);
             setDb(dbInstance);
 
-            // Persistência offline (se der erro, só ignora)
             fb.enableIndexedDbPersistence(dbInstance).catch(() => {});
 
             const auth = fb.getAuth(app);
@@ -1623,7 +1932,6 @@
               }
             });
 
-            // Garante um login anônimo inicial
             fb.signInAnonymously(auth).catch(() => {});
           } else {
             const app = window._meuAcertoApp;
@@ -1633,21 +1941,32 @@
           }
         }, []);
 
-        const handleSelectUser = (u) => {
-          setPanelUser(u);
-          try {
-            localStorage.setItem('panelUser', u);
-          } catch {}
+        const handleSetupComplete = (cfg, panel) => {
+          setConfig(cfg);
+          saveAppConfig(cfg);
+          if (panel) {
+            setActivePanel(panel);
+            try { localStorage.setItem(PANEL_STORAGE_KEY, panel); } catch {}
+          }
         };
 
         const handleLogout = () => {
-          setPanelUser(null);
-          try {
-            localStorage.removeItem('panelUser');
-          } catch {}
+          setActivePanel(null);
+          try { localStorage.removeItem(PANEL_STORAGE_KEY); } catch {}
         };
 
-        // Tela de carregamento enquanto Firebase/Auth não estão prontos
+        const handleConfigChange = (updated) => {
+          setConfig(updated);
+        };
+
+        if (firebaseError) {
+          return (
+            <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-900 p-6">
+              <p className="text-sm text-red-600 dark:text-red-400 text-center max-w-md">{firebaseError}</p>
+            </div>
+          );
+        }
+
         if (!authReady || !db) {
           return (
             <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-900">
@@ -1659,17 +1978,24 @@
           );
         }
 
-        // Se ainda não escolheu Guilherme / Thais
-        if (!panelUser) {
-          return <UserSelectionScreen onSelectUser={handleSelectUser} />;
+        if (!config?.setupComplete || !activePanel) {
+          return (
+            <SetupWizard
+              existingConfig={config}
+              initialStep={config?.setupComplete ? 'select' : undefined}
+              onComplete={handleSetupComplete}
+            />
+          );
         }
 
-        // App principal
         return (
-          <Dashboard 
-            user={panelUser} 
-            onLogout={handleLogout} 
+          <Dashboard
+            activePanel={activePanel}
+            config={config}
+            onLogout={handleLogout}
+            onConfigChange={handleConfigChange}
             db={db}
+            householdId={config.householdId}
           />
         );
       };

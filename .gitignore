@@ -79,3 +79,6 @@ coverage/
 *.key
 *.p12
 *.pfx
+
+# Firebase config gerado no deploy (secrets do GitHub)
+firebase-config.js
