@@ -1,11 +1,12 @@
-const CACHE = 'meu-acerto-v4';
+const BASE = '/ACERTO-DE-CONTAS';
+const CACHE = 'acerto-de-contas-v1';
 
 // O que é local do seu app (app shell)
 const APP_SHELL = [
-  '/meu-acerto-app/',
-  '/meu-acerto-app/index.html',
-  '/meu-acerto-app/manifest.json',
-  '/meu-acerto-app/sw.js'
+  `${BASE}/`,
+  `${BASE}/index.html`,
+  `${BASE}/manifest.json`,
+  `${BASE}/sw.js`
 ];
 
 // (Opcional) URLs de CDNs que você usa.
@@ -52,10 +53,10 @@ self.addEventListener('fetch', (e) => {
       fetch(req)
         .then((res) => {
           const copy = res.clone();
-          caches.open(CACHE).then((c) => c.put('/meu-acerto-app/index.html', copy)).catch(()=>{});
+          caches.open(CACHE).then((c) => c.put(`${BASE}/index.html`, copy)).catch(()=>{});
           return res;
         })
-        .catch(() => caches.match('/meu-acerto-app/index.html'))
+        .catch(() => caches.match(`${BASE}/index.html`))
     );
     return;
   }

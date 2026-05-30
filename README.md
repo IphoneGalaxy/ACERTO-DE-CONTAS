@@ -32,4 +32,8 @@ PWA Ready: Adicione a aplicação à tela inicial do seu celular para uma experi
 
 🚀 Como Executar
 
-Por ser um projeto web front-end, basta abrir o arquivo index.html em qualquer navegador moderno. Para que a sincronização com o banco de dados funcione, a aplicação deve ser servida a partir de um ambiente online (como o GitHub Pages, Vercel ou o próprio Codespaces).
+Por ser um projeto web front-end, basta abrir o arquivo index.html em qualquer navegador moderno. Para que a sincronização com o banco de dados funcione, a aplicação deve ser servida a partir de um ambiente online.
+
+**App publicado (GitHub Pages):** https://iphonegalaxy.github.io/ACERTO-DE-CONTAS/
+
+O deploy é feito automaticamente via GitHub Actions ao enviar alterações para a branch `main`.
