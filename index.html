@@ -122,7 +122,22 @@
         });
 
         if (!isXlsx) {
-          const wb = XLSX.read(data, { type: "string" });
+          // 🔹 DETECÇÃO AUTOMÁTICA DE DELIMITADOR (vírgula ou ponto-e-vírgula)
+          const firstLine = data.split('\n')[0] || '';
+          const hasSemicolon = firstLine.includes(';');
+          const hasComma = firstLine.includes(',');
+          
+          let delimiter = ','; // padrão
+          if (hasSemicolon && !hasComma) {
+            delimiter = ';'; // CSV europeu
+          } else if (hasSemicolon && hasComma) {
+            // Se tem ambos, conta qual aparece mais na primeira linha
+            const semiCount = (firstLine.match(/;/g) || []).length;
+            const commaCount = (firstLine.match(/,/g) || []).length;
+            delimiter = semiCount > commaCount ? ';' : ',';
+          }
+          
+          const wb = XLSX.read(data, { type: "string", FS: delimiter });
           const ws = wb.Sheets[wb.SheetNames[0]];
           return XLSX.utils.sheet_to_json(ws, { header: 1, defval: "", raw: false, blankrows: false });
         }
@@ -211,7 +226,7 @@
         return { isInstallment: false };
       }
 
-      // --- FALLBACK: Varredura de Linha (Conservador) ---
+      // --- FALLBACK: Varredura de Linha (Conservador V2) ---
       // Aqui NÃO aceitamos data, para não confundir a coluna de Data com parcela
       const extractParcelaFromText = (text) => {
         if (!text) return null;
@@ -219,12 +234,30 @@
 
         // Remove datas completas
         s = s.replace(/\b\d{1,2}\s*[\/\-]\s*\d{1,2}\s*[\/\-]\s*\d{2,4}\b/g, " ");   
+        
+        // 🔹 Remove códigos que não são parcelas (ex: 06DE10, 57507636, etc)
+        // Códigos geralmente têm letras grudadas ou são números muito grandes
+        s = s.replace(/\b\d{2}[a-z]{2}\d{2}\b/gi, " "); // ex: 06DE10, 95AB23
+        s = s.replace(/\b\d{5,}\b/g, " "); // números com 5+ dígitos não são parcelas
 
         let m = s.match(/\b(\d{1,2})\s*[\/\\]\s*(\d{1,2})\b/);
-        if (m && parseInt(m[1]) <= parseInt(m[2]) && parseInt(m[2]) > 1) return `${parseInt(m[1])}/${parseInt(m[2])}`;
+        if (m) {
+          const cur = parseInt(m[1]);
+          const tot = parseInt(m[2]);
+          // 🔹 Validação mais rigorosa: parcela atual deve ser <= total e total <= 60 (máximo razoável)
+          if (cur >= 1 && cur <= tot && tot > 1 && tot <= 60) {
+            return `${cur}/${tot}`;
+          }
+        }
 
         m = s.match(/\b(\d{1,2})\s*(?:de|of)\s*(\d{1,2})\b/);
-        if (m && parseInt(m[1]) <= parseInt(m[2]) && parseInt(m[2]) > 1) return `${parseInt(m[1])}/${parseInt(m[2])}`;
+        if (m) {
+          const cur = parseInt(m[1]);
+          const tot = parseInt(m[2]);
+          if (cur >= 1 && cur <= tot && tot > 1 && tot <= 60) {
+            return `${cur}/${tot}`;
+          }
+        }
 
         return null;
       };
