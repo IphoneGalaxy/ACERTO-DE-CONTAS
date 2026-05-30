@@ -34,6 +34,9 @@ PWA Ready: Adicione a aplicação à tela inicial do seu celular para uma experi
 
 Por ser um projeto web front-end, basta abrir o arquivo index.html em qualquer navegador moderno. Para que a sincronização com o banco de dados funcione, a aplicação deve ser servida a partir de um ambiente online.
 
-**App publicado (GitHub Pages):** https://iphonegalaxy.github.io/ACERTO-DE-CONTAS/
+**Apps publicados (GitHub Pages):**
 
-O deploy é feito automaticamente via GitHub Actions ao enviar alterações para a branch `main`.
+- Cópia nova: https://iphonegalaxy.github.io/ACERTO-DE-CONTAS/
+- Original: https://iphonegalaxy.github.io/meu-acerto-app/
+
+O deploy é feito automaticamente via GitHub Actions ao enviar alterações para a branch `main`. O mesmo código funciona nos dois repositórios.
