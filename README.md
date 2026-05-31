@@ -8,7 +8,8 @@ Meu Acerto é uma aplicação web para gerenciamento de despesas compartilhadas 
 - **Configuração personalizada**: defina os nomes das duas pessoas e cadastre quantos cartões quiser
 - **Sincronização em tempo real**: lançamentos aparecem instantaneamente para ambos via Firebase Firestore
 - **Isolamento por família**: cada casal usa um código único (`householdId`) — dados protegidos por membership
-- **Importação de faturas**: arquivos `.csv` ou `.xlsx` do banco
+- **Importação de faturas por banco**: selecione o banco, importe `.csv` ou `.xlsx`; cartões detectados automaticamente na fatura
+- **Filtro por banco**: na aba Cartão, veja todos os cartões ou só os de um banco (ex.: C6 Bank)
 - **Controle de parcelas**: gera parcelas futuras automaticamente
 - **Histórico mensal**: navegue entre meses anteriores
 - **PWA**: adicione à tela inicial do celular
@@ -18,9 +19,22 @@ Meu Acerto é uma aplicação web para gerenciamento de despesas compartilhadas 
 1. **Crie uma conta** (Google ou e-mail/senha)
 2. Escolha **Criar nova família**
 3. Informe os nomes das duas pessoas
-4. Cadastre os cartões (nome, 4 últimos dígitos, dono)
+4. **Cartões (opcional)** — pode pular e cadastrar depois pela importação da fatura
 5. **Copie o código da família** e compartilhe com a outra pessoa
 6. Escolha quem está usando o app agora
+
+### Importação por banco
+
+1. No painel, clique em **Importar**
+2. Selecione o banco da fatura (ex.: **C6 Bank**)
+3. Escolha o arquivo Excel/CSV da fatura
+4. Confirme — os **cartões são detectados** pelo arquivo e salvos na família
+5. Para filtrar lançamentos: aba **Cartão** → **Todos os bancos** ou um banco específico
+
+| Banco | Importação |
+|-------|------------|
+| C6 Bank | Disponível |
+| Itaú, BB, Bradesco, Santander, Caixa, Nubank, Inter, Mercado Pago, PicPay | Em breve |
 
 No segundo dispositivo: cole o **código da família**, depois **crie conta ou entre** com Google/e-mail — a conta fica vinculada e funciona em qualquer aparelho.
 

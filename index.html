@@ -208,15 +208,78 @@
         return snap.exists() && snap.data().createdBy === uid;
       };
 
+      const BANKS = [
+        { id: 'itau', name: 'Itaú Unibanco', enabled: false },
+        { id: 'bb', name: 'Banco do Brasil', enabled: false },
+        { id: 'bradesco', name: 'Bradesco', enabled: false },
+        { id: 'santander', name: 'Santander Brasil', enabled: false },
+        { id: 'caixa', name: 'Caixa Econômica Federal', enabled: false },
+        { id: 'nubank', name: 'Nubank', enabled: false },
+        { id: 'inter', name: 'Banco Inter', enabled: false },
+        { id: 'c6', name: 'C6 Bank', enabled: true },
+        { id: 'mercadopago', name: 'Mercado Pago', enabled: false },
+        { id: 'picpay', name: 'PicPay', enabled: false },
+      ];
+
+      const getBankById = (bankId) => BANKS.find((b) => b.id === bankId) || null;
+      const getBankName = (bankId) => getBankById(bankId)?.name || bankId || '';
+
+      const mergeDiscoveredCards = (existingCards, discovered, bankId) => {
+        const list = [...(existingCards || [])];
+        for (const d of discovered) {
+          if (!d?.last4) continue;
+          const idx = list.findIndex((c) => c.last4 === d.last4 && (c.bankId || '') === bankId);
+          if (idx < 0) {
+            list.push({
+              id: generateId(),
+              label: (d.label || `Cartão final ${d.last4}`).trim(),
+              last4: d.last4,
+              owner: 'personA',
+              bankId,
+            });
+          } else {
+            const cur = { ...list[idx] };
+            if (!cur.label?.trim() && d.label) cur.label = d.label.trim();
+            if (!cur.bankId) cur.bankId = bankId;
+            list[idx] = cur;
+          }
+        }
+        return list;
+      };
+
+      const getExpenseBankId = (expense, cards = []) => {
+        if (expense?.bankId) return expense.bankId;
+        if (expense?.type !== 'Cartão') return null;
+        const card = findCardByPaymentSource(expense.paymentSource, cards);
+        return card?.bankId || null;
+      };
+
+      const banksUsedInConfig = (cards = []) => {
+        const ids = new Set((cards || []).map((c) => c.bankId).filter(Boolean));
+        return BANKS.filter((b) => ids.has(b.id));
+      };
+
+      const banksUsedInMonth = (expenses = [], cards = []) => {
+        const ids = new Set();
+        expenses.forEach((e) => {
+          if (e.type !== 'Cartão') return;
+          const bid = getExpenseBankId(e, cards);
+          if (bid) ids.add(bid);
+        });
+        (cards || []).forEach((c) => { if (c.bankId) ids.add(c.bankId); });
+        return BANKS.filter((b) => ids.has(b.id));
+      };
+
       const buildConfig = (hid, personAName, personBName, cards) => ({
         householdId: hid,
         personA: { name: personAName.trim() },
         personB: { name: personBName.trim() },
         cards: (cards || []).map((c) => ({
           id: c.id || generateId(),
-          label: c.label.trim(),
-          last4: String(c.last4).trim(),
+          label: (c.label || '').trim(),
+          last4: String(c.last4 || '').trim(),
           owner: c.owner || 'personA',
+          bankId: c.bankId || '',
         })),
         setupComplete: true,
       });
@@ -662,8 +725,7 @@
       }
 
       const last4FromRow = (row = [], cards = []) => {
-        const knownLast4 = new Set((cards || []).map((c) => c.last4));
-        const bankLast4 = ['2581', '1009', '7292'];
+        const knownLast4 = new Set((cards || []).map((c) => c.last4).filter(Boolean));
         for (const cell of row) {
           const raw = String(cell ?? '');
           const s = raw.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
@@ -671,16 +733,160 @@
           if (m) return m[1];
           m = s.match(/(?:\*{2,}|x{3,}|xxxx)\s*(\d{4})\b/);
           if (m) return m[1];
-          for (const l4 of bankLast4) {
-            if (new RegExp(`\\b${l4}\\b`).test(s)) return l4;
-          }
           for (const l4 of knownLast4) {
-            if (s.includes(l4)) return l4;
+            if (new RegExp(`\\b${l4}\\b`).test(s)) return l4;
           }
           m = s.match(/\b(?!20\d{2}\b)(\d{4})\b/);
           if (m) return m[1];
         }
         return null;
+      };
+
+      const last4FromRowC6 = (row = [], cards = []) => {
+        const knownLast4 = new Set((cards || []).map((c) => c.last4).filter(Boolean));
+        const c6Last4 = ['2581', '1009', '7292'];
+        for (const cell of row) {
+          const raw = String(cell ?? '');
+          const s = raw.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
+          let m = s.match(/\bfinal\s*(\d{4})\b/);
+          if (m) return m[1];
+          m = s.match(/(?:\*{2,}|x{3,}|xxxx)\s*(\d{4})\b/);
+          if (m) return m[1];
+          for (const l4 of c6Last4) {
+            if (new RegExp(`\\b${l4}\\b`).test(s)) return l4;
+          }
+          for (const l4 of knownLast4) {
+            if (new RegExp(`\\b${l4}\\b`).test(s)) return l4;
+          }
+          m = s.match(/\b(?!20\d{2}\b)(\d{4})\b/);
+          if (m) return m[1];
+        }
+        return null;
+      };
+
+      const titularFromRowC6 = (row, cols, last4) => {
+        if (cols.idxTitular >= 0) {
+          const t = String(row[cols.idxTitular] || '').trim();
+          if (t && t.length > 2 && !/^\d{4}$/.test(t)) return t;
+        }
+        for (const cell of row) {
+          const s = String(cell ?? '').trim();
+          if (!s || s === last4 || /^\d{4}$/.test(s)) continue;
+          if (/^\d{1,2}\/\d{1,2}\/\d{2,4}$/.test(s)) continue;
+          if (/^(única|unica|eletrico|eletrônico)$/i.test(s)) continue;
+          if (/r\$\s*\d/i.test(s)) continue;
+          if (s.length >= 3) return s;
+        }
+        return `Cartão final ${last4}`;
+      };
+
+      const parseC6Spreadsheet = (rows, config, householdId, currentMonth) => {
+        const normH = (h) => norm(h || '');
+        const isHeaderRow = (r = []) => {
+          const s = r.map((x) => norm(x));
+          const hasData = s.some((c) => /\bdata\b/.test(c));
+          const hasDesc = s.some((c) => /(descri|estab|hist|favorecido|detalhe|loja|comprovante)/.test(c));
+          const hasValor = s.some((c) => /(valor|d[eé]bito|cr[eé]dito|amount|total)/.test(c));
+          return (hasData && hasValor) || (hasData && hasDesc);
+        };
+        let headerIdx = rows.findIndex(isHeaderRow);
+        if (headerIdx < 0) headerIdx = 0;
+
+        const header = rows[headerIdx] || [];
+        const body = rows.slice(headerIdx + 1);
+        const cols = detectColumns(header);
+
+        const discoveredMap = new Map();
+        const expenses = [];
+
+        for (const row of body) {
+          const rawDate = cols.idxData >= 0 ? row[cols.idxData] : null;
+          let dateStr = null;
+          if (rawDate) dateStr = excelSerialToPT(rawDate);
+          if (!dateStr) {
+            for (const c of row) {
+              const s = String(c).trim();
+              if (/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(s)) { dateStr = s; break; }
+            }
+          }
+          if (!dateStr) continue;
+
+          const mk = monthKeyFromPtDate(dateStr);
+          const desc = getDescriptionFromRow(row, cols);
+          if (shouldIgnorePaymentInclusion(row, desc)) continue;
+
+          let amount = NaN;
+          if (cols.idxValorBRL >= 0) amount = parseMoney(row[cols.idxValorBRL]);
+          if (!Number.isFinite(amount) && cols.idxValorGen >= 0) amount = parseMoney(row[cols.idxValorGen]);
+          if (!Number.isFinite(amount)) {
+            for (let i = row.length - 1; i >= 0; i--) {
+              const n = parseMoney(row[i]);
+              if (Number.isFinite(n) && Math.abs(n) > 0) { amount = n; break; }
+            }
+          }
+          if (!Number.isFinite(amount)) continue;
+
+          const parcelaInfo = detectInstallmentForRow(row, cols);
+          const last4 = last4FromRowC6(row, config.cards);
+          if (!last4) continue;
+
+          const label = titularFromRowC6(row, cols, last4);
+          if (!discoveredMap.has(last4)) discoveredMap.set(last4, { last4, label });
+
+          let source = 'Cartão';
+          const matchedCard = findCardByLast4(last4, config.cards);
+          if (matchedCard) source = cardDisplaySource(matchedCard);
+          else source = `Cartão (final ${last4})`;
+
+          let panelUserVal = 'personA';
+          if (matchedCard) panelUserVal = panelUserFromCard(matchedCard);
+
+          expenses.push({
+            householdId,
+            description: desc,
+            amount: round2(amount),
+            date: dateStr,
+            type: 'Cartão',
+            paymentSource: source,
+            bankId: 'c6',
+            split: 'Dividido',
+            paidBy: 'Cartão',
+            monthKey: currentMonth,
+            originalMonthKey: mk,
+            parcela: parcelaInfo.isInstallment ? parcelaInfo.info : null,
+            isInstallment: parcelaInfo.isInstallment,
+            installmentTotal: parcelaInfo.total,
+            installmentCurrent: parcelaInfo.current,
+            installmentPlanId: parcelaInfo.isInstallment
+              ? `${norm(desc)}|${last4}|${parcelaInfo.total}`
+              : null,
+            panelUser: panelUserVal,
+          });
+        }
+
+        return {
+          expenses,
+          discovered: Array.from(discoveredMap.values()),
+          bankId: 'c6',
+        };
+      };
+
+      const createImportStub = (bankId) => () => {
+        const bank = getBankById(bankId);
+        throw new Error(`IMPORT_NOT_READY:${bank?.name || bankId}`);
+      };
+
+      const importParsers = {
+        c6: (rows, config, householdId, currentMonth) => parseC6Spreadsheet(rows, config, householdId, currentMonth),
+        itau: createImportStub('itau'),
+        bb: createImportStub('bb'),
+        bradesco: createImportStub('bradesco'),
+        santander: createImportStub('santander'),
+        caixa: createImportStub('caixa'),
+        nubank: createImportStub('nubank'),
+        inter: createImportStub('inter'),
+        mercadopago: createImportStub('mercadopago'),
+        picpay: createImportStub('picpay'),
       };
 
       const parseMoney = (input) => {
@@ -1070,7 +1276,7 @@
         const [saveError, setSaveError] = useState('');
 
         const addCard = () => {
-          setCards((prev) => [...prev, { id: generateId(), label: '', last4: '', owner: 'personA' }]);
+          setCards((prev) => [...prev, { id: generateId(), label: '', last4: '', owner: 'personA', bankId: '' }]);
         };
 
         const updateCard = (id, field, value) => {
@@ -1236,7 +1442,8 @@
                 <LogoutIconButton onClick={onSignOut} className="absolute top-4 right-4" />
               )}
               <h1 className="text-2xl font-bold mb-2 mt-8 text-slate-800 dark:text-white">Cartões</h1>
-              <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">Adicione quantos cartões quiser e indique o dono de cada um.</p>
+              <p className="text-sm text-slate-600 dark:text-slate-400 mb-2">Adicione cartões manualmente ou pule e cadastre importando a fatura depois.</p>
+              <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">Na importação, os cartões são detectados automaticamente pelo arquivo do banco.</p>
               <div className="space-y-3 flex-1 overflow-y-auto mb-4">
                 {cards.map((c) => (
                   <div key={c.id} className="bg-white dark:bg-slate-800 p-3 rounded-xl space-y-2 shadow-sm">
@@ -1251,6 +1458,12 @@
                         <option value="both">Ambos</option>
                       </select>
                     </div>
+                    <select className={ui.select} value={c.bankId || ''} onChange={(e) => updateCard(c.id, 'bankId', e.target.value)}>
+                      <option value="">Banco (opcional)</option>
+                      {BANKS.map((b) => (
+                        <option key={b.id} value={b.id}>{b.name}{!b.enabled ? ' (em breve)' : ''}</option>
+                      ))}
+                    </select>
                     <button onClick={() => removeCard(c.id)} className="text-xs text-red-500 hover:text-red-700">Remover</button>
                   </div>
                 ))}
@@ -1258,12 +1471,20 @@
                   + Adicionar cartão
                 </button>
               </div>
-              <button disabled={cards.length > 0 && !validCards} onClick={() => {
-                if (mode === 'create' && !householdId) setHouseholdId(generateId());
-                setStep('household');
-              }} className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
-                Continuar
-              </button>
+              <div className="flex gap-2">
+                <button type="button" onClick={() => {
+                  if (mode === 'create' && !householdId) setHouseholdId(generateId());
+                  setStep('household');
+                }} className="flex-1 py-3 rounded-xl border border-slate-300 dark:border-slate-600 text-slate-600 dark:text-slate-300 font-semibold hover:bg-slate-100 dark:hover:bg-slate-800">
+                  Pular
+                </button>
+                <button disabled={cards.length > 0 && !validCards} onClick={() => {
+                  if (mode === 'create' && !householdId) setHouseholdId(generateId());
+                  setStep('household');
+                }} className="flex-1 py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
+                  Continuar
+                </button>
+              </div>
             </div>
           );
         }
@@ -1335,7 +1556,7 @@
 
         if (!isOpen) return null;
 
-        const addCard = () => setCards((p) => [...p, { id: generateId(), label: '', last4: '', owner: 'personA' }]);
+        const addCard = () => setCards((p) => [...p, { id: generateId(), label: '', last4: '', owner: 'personA', bankId: '' }]);
         const updateCard = (id, field, value) => setCards((p) => p.map((c) => c.id === id ? { ...c, [field]: value } : c));
         const removeCard = (id) => setCards((p) => p.filter((c) => c.id !== id));
 
@@ -1402,6 +1623,12 @@
                       <option value="both">Ambos</option>
                     </select>
                   </div>
+                  <select className={ui.select} value={c.bankId || ''} onChange={(e) => updateCard(c.id, 'bankId', e.target.value)}>
+                    <option value="">Banco</option>
+                    {BANKS.map((b) => (
+                      <option key={b.id} value={b.id}>{b.name}</option>
+                    ))}
+                  </select>
                   <button onClick={() => removeCard(c.id)} className="text-xs text-red-500">Remover</button>
                 </div>
               ))}
@@ -1456,7 +1683,13 @@
         const [delTarget, setDelTarget] = useState(null);
         const [deleting, setDeleting] = useState(false);
         const [importedExpenses, setImportedExpenses] = useState([]);
+        const [importDiscoveredCards, setImportDiscoveredCards] = useState([]);
+        const [importBankId, setImportBankId] = useState('');
         const [isImporting, setIsImporting] = useState(false);
+        const [isBankSelectOpen, setIsBankSelectOpen] = useState(false);
+        const [importError, setImportError] = useState('');
+        const [cardBankFilter, setCardBankFilter] = useState('todos');
+        const pendingImportBankRef = useRef('');
         const fileInputRef = useRef(null);
 
         // Ensure refs are initialized
@@ -1598,6 +1831,15 @@
           });
         }, [expensesForScope, activePanel]);
 
+        useEffect(() => {
+          if (filterType !== 'Cartão') setCardBankFilter('todos');
+        }, [filterType]);
+
+        const bankFiltersAvailable = useMemo(
+          () => banksUsedInMonth(expenses, config.cards),
+          [expenses, config.cards]
+        );
+
         const filteredList = useMemo(() => {
           let base = visibleExpensesForScope;
           if (filterType !== 'Todos') {
@@ -1607,12 +1849,15 @@
                   base = base.filter(e => e.type === filterType);
               }
           }
+          if (filterType === 'Cartão' && cardBankFilter !== 'todos') {
+            base = base.filter((e) => getExpenseBankId(e, config.cards) === cardBankFilter);
+          }
           return base.sort((a,b) => {
               const da = ptDateToDateObj(a.date);
               const db = ptDateToDateObj(b.date);
               return (da && db) ? da - db : 0;
           });
-        }, [visibleExpensesForScope, filterType]);
+        }, [visibleExpensesForScope, filterType, cardBankFilter, config.cards]);
 
         // --- TOTAIS (ATUALIZADO V2) ---
         const { partG, partT, gPaid, tPaid } = useMemo(() => {
@@ -1679,16 +1924,23 @@
         const cardTotals = useMemo(() => {
           let tot = 0;
           const perCard = {};
-          (config.cards || []).forEach((c) => { perCard[c.id] = 0; });
+          const cardsShown = (config.cards || []).filter((c) =>
+            cardBankFilter === 'todos' || c.bankId === cardBankFilter
+          );
+          cardsShown.forEach((c) => { perCard[c.id] = 0; });
           for (const e of expenses) {
               if (e.type !== 'Cartão') continue;
+              const eb = getExpenseBankId(e, config.cards);
+              if (cardBankFilter !== 'todos' && eb !== cardBankFilter) continue;
               const val = Number(e.amount||0);
               tot += val;
               const card = findCardByPaymentSource(e.paymentSource, config.cards);
-              if (card) perCard[card.id] = (perCard[card.id] || 0) + val;
+              if (card && (cardBankFilter === 'todos' || card.bankId === cardBankFilter)) {
+                perCard[card.id] = (perCard[card.id] || 0) + val;
+              }
           }
-          return { grandTotal: round2(tot), perCard };
-        }, [expenses, config.cards]);
+          return { grandTotal: round2(tot), perCard, cardsShown };
+        }, [expenses, config.cards, cardBankFilter]);
 
         // Valor que "some" da fatura no mês seguinte (parcelas que terminam neste mês)
         const freedNextInvoice = useMemo(() => {
@@ -1794,9 +2046,11 @@
 
           let panelUserVal = activePanel;
 
+          let expenseBankId = null;
           if (fTipo === 'Cartão') {
               const card = findCardByPaymentSource(fFonte, config.cards);
               panelUserVal = panelUserFromCard(card);
+              expenseBankId = card?.bankId || null;
           } else {
               panelUserVal = activePanel;
           }
@@ -1819,6 +2073,7 @@
               installmentTotal: instObj.total,
               panelUser: panelUserVal,
           };
+          if (expenseBankId) payload.bankId = expenseBankId;
 
           // Remove campos undefined
           Object.keys(payload).forEach((k) => {
@@ -1863,97 +2118,53 @@
         const makeDedupeKey = (e) => 
           `${norm(e.description)}|${e.amount}|${e.date}|${e.parcela||''}|${norm(e.type)}|${norm(e.paymentSource)}|${e.monthKey}`;
 
+        const openImportFlow = () => {
+          setImportError('');
+          setIsBankSelectOpen(true);
+        };
+
+        const selectBankForImport = (bankId) => {
+          const bank = getBankById(bankId);
+          if (!bank?.enabled) return;
+          pendingImportBankRef.current = bankId;
+          setImportError('');
+          setIsBankSelectOpen(false);
+          fileInputRef.current?.click();
+        };
+
         const handleFileChange = async (e) => {
           const file = e.target.files?.[0];
+          const bankId = pendingImportBankRef.current;
+          pendingImportBankRef.current = '';
           if (!file) return;
+          if (!bankId) {
+            setImportError('Selecione o banco antes de importar.');
+            if (fileInputRef.current) fileInputRef.current.value = '';
+            return;
+          }
           setIsImporting(true);
+          setImportError('');
           try {
               const rows = await readSpreadsheetFile(file);
-              if (!rows.length) throw new Error("Vazio");
+              if (!rows.length) throw new Error('Vazio');
 
-              // --- SMART IMPORT (V5 - Detecção Prioritária Coluna F) ---
-              const normH = (h) => norm(h || '');
-              const isHeaderRow = (r=[]) => {
-                  const s = r.map(x => norm(x));
-                  const hasData = s.some(c => /\bdata\b/.test(c));
-                  const hasDesc = s.some(c => /(descri|estab|hist|favorecido|detalhe|loja|comprovante)/.test(c));
-                  const hasValor = s.some(c => /(valor|d[eé]bito|cr[eé]dito|amount|total)/.test(c));
-                  return (hasData && hasValor) || (hasData && hasDesc);
-              };
-              let headerIdx = rows.findIndex(isHeaderRow);
-              if (headerIdx < 0) headerIdx = 0;
+              const parser = importParsers[bankId];
+              if (!parser) throw new Error('IMPORT_NOT_READY:Banco');
 
-              const header = rows[headerIdx] || [];
-              const body = rows.slice(headerIdx + 1);
-              const cols = detectColumns(header);   
-
-              const mapped = [];
-              for (const row of body) {
-                  const rawDate = cols.idxData >= 0 ? row[cols.idxData] : null;
-                  let dateStr = null;
-                  if (rawDate) dateStr = excelSerialToPT(rawDate);
-                  if (!dateStr) {
-                     for (const c of row) {
-                         const s = String(c).trim();
-                         if(/^\d{1,2}[\/\-]\d{1,2}[\/\-]\d{2,4}$/.test(s)) { dateStr=s; break; }
-                     }
-                  }
-                  if (!dateStr) continue;
-
-                  // Keep "real" month key just in case, but import into CURRENTLY VIEWED month
-                  const mk = monthKeyFromPtDate(dateStr);
-
-                  const desc = getDescriptionFromRow(row, cols);
-                  if (shouldIgnorePaymentInclusion(row, desc)) continue;
-
-                  let amount = NaN;
-                  if (cols.idxValorBRL >= 0) amount = parseMoney(row[cols.idxValorBRL]);
-                  if (!Number.isFinite(amount) && cols.idxValorGen >= 0) amount = parseMoney(row[cols.idxValorGen]);
-                  if (!Number.isFinite(amount)) {
-                      for (let i = row.length - 1; i >= 0; i--) {
-                          const n = parseMoney(row[i]);
-                          if (Number.isFinite(n) && Math.abs(n) > 0) { amount = n; break; }
-                      }
-                  }
-                  if (!Number.isFinite(amount)) continue;
-
-                  // --- PARCELA: detecta usando a linha inteira, dando prioridade à coluna de parcelas ---
-                  const parcelaInfo = detectInstallmentForRow(row, cols);
-
-                  const last4 = last4FromRow(row, config.cards);
-                  let source = 'Cartão';
-                  const matchedCard = findCardByLast4(last4, config.cards);
-                  if (matchedCard) source = cardDisplaySource(matchedCard);
-                  else if (last4) source = `Cartão (final ${last4})`;
-
-                  let panelUserVal = 'personA';
-                  if (matchedCard) panelUserVal = panelUserFromCard(matchedCard);
-
-                  mapped.push({
-                      householdId,
-                      description: desc,
-                      amount: round2(amount),
-                      date: dateStr,
-                      type: 'Cartão',
-                      paymentSource: source,
-                      split: 'Dividido',
-                      paidBy: 'Cartão',
-                      monthKey: currentMonth,
-                      originalMonthKey: mk,
-                      parcela: parcelaInfo.isInstallment ? parcelaInfo.info : null,
-                      isInstallment: parcelaInfo.isInstallment,
-                      installmentTotal: parcelaInfo.total,
-                      installmentCurrent: parcelaInfo.current,
-                      installmentPlanId: parcelaInfo.isInstallment
-                        ? `${norm(desc)}|${last4 || 'nocard'}|${parcelaInfo.total}`
-                        : null,
-                      panelUser: panelUserVal,
-                  });
-              }
-
-              setImportedExpenses(mapped);
+              const result = parser(rows, config, householdId, currentMonth);
+              setImportedExpenses(result.expenses || []);
+              setImportDiscoveredCards(result.discovered || []);
+              setImportBankId(result.bankId || bankId);
               setIsImportOpen(true);
-          } catch(err) { console.error(err); }
+          } catch (err) {
+              console.error(err);
+              const msg = String(err.message || err);
+              if (msg.startsWith('IMPORT_NOT_READY:')) {
+                setImportError(`Importação para ${msg.split(':')[1]} em breve.`);
+              } else {
+                setImportError('Erro ao ler o arquivo. Verifique o formato da fatura.');
+              }
+          }
           setIsImporting(false);
           if (fileInputRef.current) fileInputRef.current.value = '';
         };
@@ -1963,38 +2174,50 @@
 
           setIsImporting(true);
 
-          // Pre-load existing data to dedupe
-          const monthsInFile = [...new Set(importedExpenses.map(e => e.monthKey))];
-          const expRef = collection(db, 'expenses');
-          const existingKeys = new Set();
+          try {
+            const bankId = importBankId || 'c6';
+            if (importDiscoveredCards.length > 0) {
+              const mergedCards = mergeDiscoveredCards(config.cards, importDiscoveredCards, bankId);
+              const updatedConfig = buildConfig(config.householdId, nameA(config), nameB(config), mergedCards);
+              await saveHouseholdToCloud(db, updatedConfig, uid);
+              saveAppConfig(uid, updatedConfig);
+              onConfigChange(updatedConfig);
+            }
 
-          await Promise.all(monthsInFile.map(async (mk) => {
-              const q = query(expRef, where('householdId', '==', householdId), where('monthKey', '==', mk));
-              const snap = await window.FirebaseLib.getDocs(q);
-              snap.forEach(doc => {
-                  const e = doc.data();
-                  existingKeys.add(makeDedupeKey(e));
-              });
-          }));
+            const monthsInFile = [...new Set(importedExpenses.map(e => e.monthKey))];
+            const expRef = collection(db, 'expenses');
+            const existingKeys = new Set();
 
-          const batch = writeBatch(db);
-          let count = 0;
-          importedExpenses.forEach(imp => {
-              const key = makeDedupeKey(imp);
-              if (!existingKeys.has(key)) {   
-                  const { installmentPlanId, ...toSave } = imp;
-                  if (imp.installmentPlanId) toSave.installmentPlanId = imp.installmentPlanId;
+            await Promise.all(monthsInFile.map(async (mk) => {
+                const q = query(expRef, where('householdId', '==', householdId), where('monthKey', '==', mk));
+                const snap = await window.FirebaseLib.getDocs(q);
+                snap.forEach((d) => {
+                    existingKeys.add(makeDedupeKey(d.data()));
+                });
+            }));
 
-                  // Remove undefined fields
-                  Object.keys(toSave).forEach(key => toSave[key] === undefined && delete toSave[key]);
+            const batch = writeBatch(db);
+            let count = 0;
+            importedExpenses.forEach((imp) => {
+                const key = makeDedupeKey(imp);
+                if (!existingKeys.has(key)) {
+                    const toSave = { ...imp };
+                    if (imp.installmentPlanId) toSave.installmentPlanId = imp.installmentPlanId;
+                    Object.keys(toSave).forEach((k) => toSave[k] === undefined && delete toSave[k]);
+                    batch.set(doc(expRef), toSave);
+                    count++;
+                }
+            });
+            if (count > 0) await batch.commit();
 
-                  batch.set(doc(expRef), toSave);   
-                  count++;   
-              }
-          });
-          if (count > 0) await batch.commit();
-          setIsImportOpen(false);
-          setImportedExpenses([]);
+            setIsImportOpen(false);
+            setImportedExpenses([]);
+            setImportDiscoveredCards([]);
+            setImportBankId('');
+          } catch (err) {
+            console.error(err);
+            setImportError('Erro ao salvar importação. Tente novamente.');
+          }
           setIsImporting(false);
         };
 
@@ -2143,10 +2366,13 @@
                       {(config.cards || []).length === 0 && (
                         <p className="text-slate-500 dark:text-slate-400">Nenhum cartão configurado.</p>
                       )}
-                      {(config.cards || []).map((card) => (
+                      {(cardTotals.cardsShown || []).map((card) => (
                       <div key={card.id} className="flex justify-between">
                           <span className="text-slate-600 dark:text-slate-300">
                           {cardDisplaySource(card)}
+                          {card.bankId && (
+                            <span className="text-slate-400 dark:text-slate-500"> · {getBankName(card.bankId)}</span>
+                          )}
                           </span>
                           <span className="font-semibold text-slate-900 dark:text-slate-100">
                           {formatBRL(cardTotals.perCard[card.id] || 0)}
@@ -2202,10 +2428,13 @@
                           setFData(new Date().toLocaleDateString('pt-PT', { timeZone: 'UTC' }));
                           setIsAddOpen(true);
                       }} className={`flex-shrink-0 px-4 py-2 rounded-xl text-white font-semibold shadow ${theme.bg} ${theme.hover}`}>+ Novo</button>
-                      <button onClick={()=>fileInputRef.current?.click()} className="flex-shrink-0 px-4 py-2 rounded-xl bg-white dark:bg-slate-800 shadow text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Importar</button>
-                      <input ref={fileInputRef} type="file" hidden onChange={handleFileChange} />
+                      <button onClick={openImportFlow} className="flex-shrink-0 px-4 py-2 rounded-xl bg-white dark:bg-slate-800 shadow text-slate-600 dark:text-slate-300 hover:bg-slate-50 dark:hover:bg-slate-700">Importar</button>
+                      <input ref={fileInputRef} type="file" accept=".csv,.xlsx,.xls" hidden onChange={handleFileChange} />
                       <button onClick={()=>setIsClearOpen(true)} className="flex-shrink-0 px-4 py-2 rounded-xl bg-white dark:bg-slate-800 shadow text-red-500 hover:bg-red-50 dark:hover:bg-slate-700">Limpar</button>
                   </div>
+                  {importError && !isBankSelectOpen && (
+                    <p className="text-sm text-red-500 mb-2">{importError}</p>
+                  )}
 
                   <div className="rounded-2xl overflow-hidden">
                       <div className="flex gap-2 p-1 mb-2 overflow-x-auto">
@@ -2223,6 +2452,36 @@
                                </button>
                             ))}
                       </div>
+
+                      {filterType === 'Cartão' && bankFiltersAvailable.length > 0 && (
+                        <div className="flex gap-2 p-1 mb-2 overflow-x-auto">
+                          <button
+                            type="button"
+                            onClick={() => setCardBankFilter('todos')}
+                            className={`px-3 py-1 rounded-full text-xs whitespace-nowrap transition ${
+                              cardBankFilter === 'todos'
+                                ? theme.bg + ' text-white'
+                                : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'
+                            }`}
+                          >
+                            Todos os bancos
+                          </button>
+                          {bankFiltersAvailable.map((b) => (
+                            <button
+                              key={b.id}
+                              type="button"
+                              onClick={() => setCardBankFilter(b.id)}
+                              className={`px-3 py-1 rounded-full text-xs whitespace-nowrap transition ${
+                                cardBankFilter === b.id
+                                  ? theme.bg + ' text-white'
+                                  : 'bg-slate-200 dark:bg-slate-700 text-slate-500 dark:text-slate-400'
+                              }`}
+                            >
+                              {b.name}
+                            </button>
+                          ))}
+                        </div>
+                      )}
 
                       <div className="flex flex-col space-y-2">
                           {filteredList.length === 0 && <div className="p-8 text-center text-slate-500 dark:text-slate-400 text-sm bg-white dark:bg-slate-800 rounded-2xl">Nenhum lançamento neste mês.</div>}
@@ -2350,13 +2609,59 @@
               </Modal>
 
               {/* Outros Modais (Import, Delete, Clear) mantidos com estilo dark mode */}
-              <Modal isOpen={isImportOpen} onClose={()=>setIsImportOpen(false)}>
-                  <h3 className="font-bold mb-2 text-slate-900 dark:text-slate-100">Confirmar Importação</h3>
-                  <p className="text-sm mb-4 text-slate-600 dark:text-slate-400">Encontrados {importedExpenses.length} itens novos.</p>
-                  <div className="max-h-40 overflow-y-auto bg-slate-50 dark:bg-slate-800 p-2 text-xs mb-4 space-y-1 rounded border dark:border-slate-700">
-                      {importedExpenses.map((e,i)=><div key={i} className="flex justify-between text-slate-700 dark:text-slate-300"><span>{e.description}</span><span>{formatBRL(e.amount)}</span></div>)}
+              <Modal isOpen={isBankSelectOpen} onClose={() => setIsBankSelectOpen(false)}>
+                  <h3 className="font-bold mb-2 text-slate-900 dark:text-slate-100">Selecionar banco</h3>
+                  <p className="text-sm mb-4 text-slate-600 dark:text-slate-400">
+                    Escolha o banco da fatura que você vai importar. Os cartões serão detectados automaticamente pelo arquivo.
+                  </p>
+                  <div className="max-h-64 overflow-y-auto space-y-2 mb-4">
+                    {BANKS.map((b) => (
+                      <button
+                        key={b.id}
+                        type="button"
+                        disabled={!b.enabled}
+                        onClick={() => selectBankForImport(b.id)}
+                        className={`w-full text-left px-4 py-3 rounded-xl border transition ${
+                          b.enabled
+                            ? 'border-slate-200 dark:border-slate-600 hover:border-indigo-400 hover:bg-slate-50 dark:hover:bg-slate-800'
+                            : 'border-slate-100 dark:border-slate-700 opacity-60 cursor-not-allowed'
+                        }`}
+                      >
+                        <span className="font-medium text-slate-800 dark:text-slate-100">{b.name}</span>
+                        {!b.enabled && (
+                          <span className="ml-2 text-xs text-slate-500">Em breve</span>
+                        )}
+                      </button>
+                    ))}
                   </div>
-                  <button onClick={confirmImport} className={ui.btnPrimary + " w-full"}>Importar {importedExpenses.length} itens</button>
+                  {importError && <p className="text-sm text-red-500 mb-2">{importError}</p>}
+                  <button type="button" className={ui.btnGhost + ' w-full'} onClick={() => setIsBankSelectOpen(false)}>Cancelar</button>
+              </Modal>
+
+              <Modal isOpen={isImportOpen} onClose={()=>{ setIsImportOpen(false); setImportDiscoveredCards([]); setImportBankId(''); }}>
+                  <h3 className="font-bold mb-2 text-slate-900 dark:text-slate-100">Confirmar importação</h3>
+                  <p className="text-sm mb-1 text-slate-600 dark:text-slate-400">
+                    Banco: <strong>{getBankName(importBankId)}</strong> · {importedExpenses.length} lançamento(s)
+                  </p>
+                  {importDiscoveredCards.length > 0 && (
+                    <div className="mb-3 p-2 rounded-lg bg-indigo-50 dark:bg-indigo-900/30 border border-indigo-100 dark:border-indigo-800">
+                      <p className="text-xs font-medium text-indigo-800 dark:text-indigo-200 mb-1">Cartões detectados na fatura:</p>
+                      <ul className="text-xs text-indigo-700 dark:text-indigo-300 space-y-0.5">
+                        {importDiscoveredCards.map((c) => (
+                          <li key={c.last4}>{c.label} (final {c.last4})</li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                  <div className="max-h-40 overflow-y-auto bg-slate-50 dark:bg-slate-800 p-2 text-xs mb-4 space-y-1 rounded border dark:border-slate-700">
+                      {importedExpenses.slice(0, 30).map((e,i)=><div key={i} className="flex justify-between text-slate-700 dark:text-slate-300"><span className="truncate pr-2">{e.description}</span><span>{formatBRL(e.amount)}</span></div>)}
+                      {importedExpenses.length > 30 && (
+                        <p className="text-slate-500 pt-1">… e mais {importedExpenses.length - 30} itens</p>
+                      )}
+                  </div>
+                  <button onClick={confirmImport} disabled={isImporting} className={ui.btnPrimary + " w-full disabled:opacity-50"}>
+                    {isImporting ? 'Importando...' : `Importar ${importedExpenses.length} itens`}
+                  </button>
               </Modal>
 
               <Modal isOpen={isDelOpen} onClose={()=>setDelOpen(false)}>
