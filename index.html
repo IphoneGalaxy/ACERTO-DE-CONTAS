@@ -131,9 +131,17 @@
         } catch {}
       };
 
-      const authErrorMessage = (code) => {
+      const authErrorMessage = (code, opts = {}) => {
+        const { mode, hasFamilyCode } = opts;
+        if (hasFamilyCode && mode === 'login' && (
+          code === 'auth/user-not-found' || code === 'auth/wrong-password' || code === 'auth/invalid-credential'
+        )) {
+          return 'Conta não encontrada. Use a aba Criar conta para se cadastrar e vincular à família.';
+        }
         const map = {
-          'auth/email-already-in-use': 'Este e-mail já está cadastrado. Tente entrar.',
+          'auth/email-already-in-use': hasFamilyCode
+            ? 'Este e-mail já existe. Use a aba Entrar para vincular à família.'
+            : 'Este e-mail já está cadastrado. Tente entrar.',
           'auth/invalid-email': 'E-mail inválido.',
           'auth/weak-password': 'A senha deve ter no mínimo 8 caracteres.',
           'auth/user-not-found': 'E-mail ou senha incorretos.',
@@ -928,7 +936,7 @@
             }
           } catch (e) {
             if (hasFamilyCode) sessionStorage.removeItem('meuAcertoPendingJoinCode');
-            setError(authErrorMessage(e.code));
+            setError(authErrorMessage(e.code, { mode, hasFamilyCode }));
           } finally {
             setLoading(false);
           }
@@ -945,7 +953,7 @@
             await ensureUserProfile(window._meuAcertoDb, cred.user);
           } catch (e) {
             if (hasFamilyCode) sessionStorage.removeItem('meuAcertoPendingJoinCode');
-            setError(authErrorMessage(e.code));
+            setError(authErrorMessage(e.code, { mode, hasFamilyCode }));
           } finally {
             setLoading(false);
           }
@@ -961,10 +969,14 @@
               <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
                 <p className="text-sm font-medium text-slate-700 dark:text-slate-200">Código da família</p>
                 <p className="text-xs text-slate-500">
-                  Cole o código e depois crie conta ou entre abaixo — sua conta ficará vinculada à família
+                  Cole o código e use <strong>Criar conta</strong> abaixo (primeira vez) ou <strong>Entrar</strong> se já tiver cadastro
                 </p>
                 <input className={ui.input} placeholder="Cole o código da família"
-                  value={familyCode} onChange={(e) => setFamilyCode(e.target.value)} />
+                  value={familyCode} onChange={(e) => {
+                    const v = e.target.value;
+                    setFamilyCode(v);
+                    if (v.trim()) setMode('register');
+                  }} />
               </div>
 
               <div className="flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1">
@@ -977,6 +989,11 @@
                   Criar conta
                 </button>
               </div>
+              {hasFamilyCode && mode === 'login' && (
+                <p className="text-xs text-amber-600 dark:text-amber-400 text-center">
+                  Primeira vez com este e-mail? Troque para <button type="button" onClick={() => setMode('register')} className="underline font-medium">Criar conta</button>
+                </p>
+              )}
               <div>
                 <label className={ui.label}>E-mail</label>
                 <input type="email" className={ui.input} placeholder="seu@email.com"
