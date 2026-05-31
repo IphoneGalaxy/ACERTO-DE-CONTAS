@@ -336,8 +336,31 @@
 
       const findCardByPaymentSource = (src, cards = []) => {
         const s = norm(src);
-        if (!s) return null;
-        return cards.find((c) => s.includes(c.last4) || s.includes(norm(c.label))) || null;
+        if (!s || !cards.length) return null;
+
+        // 1) Final explícito no texto — evita confundir cartões com mesmo titular
+        const explicit = (() => {
+          const m = String(src || '').match(/\(final\s*(\d{4})\)/i)
+            || String(src || '').match(/\bfinal\s*(\d{4})\b/i);
+          return m ? m[1] : null;
+        })();
+        if (explicit) {
+          const exact = cards.find((c) => c.last4 === explicit);
+          if (exact) return exact;
+        }
+
+        // 2) Qualquer last4 cadastrado presente na string (só se for único)
+        const byLast4 = cards.filter((c) => c.last4 && s.includes(c.last4));
+        if (byLast4.length === 1) return byLast4[0];
+
+        // 3) Rótulo — só se houver um único cartão com esse nome
+        const byLabel = cards.filter((c) => {
+          const lbl = norm(c.label);
+          return lbl.length >= 3 && s.includes(lbl);
+        });
+        if (byLabel.length === 1) return byLabel[0];
+
+        return null;
       };
 
       const panelUserFromCard = (card) => {
@@ -640,6 +663,7 @@
 
       const last4FromRow = (row = [], cards = []) => {
         const knownLast4 = new Set((cards || []).map((c) => c.last4));
+        const bankLast4 = ['2581', '1009', '7292'];
         for (const cell of row) {
           const raw = String(cell ?? '');
           const s = raw.normalize('NFD').replace(/\p{Diacritic}/gu, '').toLowerCase();
@@ -647,6 +671,9 @@
           if (m) return m[1];
           m = s.match(/(?:\*{2,}|x{3,}|xxxx)\s*(\d{4})\b/);
           if (m) return m[1];
+          for (const l4 of bankLast4) {
+            if (new RegExp(`\\b${l4}\\b`).test(s)) return l4;
+          }
           for (const l4 of knownLast4) {
             if (s.includes(l4)) return l4;
           }
@@ -1897,6 +1924,7 @@
                   let source = 'Cartão';
                   const matchedCard = findCardByLast4(last4, config.cards);
                   if (matchedCard) source = cardDisplaySource(matchedCard);
+                  else if (last4) source = `Cartão (final ${last4})`;
 
                   let panelUserVal = 'personA';
                   if (matchedCard) panelUserVal = panelUserFromCard(matchedCard);
