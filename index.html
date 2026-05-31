@@ -36,7 +36,7 @@
         enableIndexedDbPersistence, orderBy, limit, startAfter, documentId 
       } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
       import { 
-        getAuth, onAuthStateChanged, signOut, signInAnonymously,
+        getAuth, onAuthStateChanged, signOut,
         createUserWithEmailAndPassword, signInWithEmailAndPassword,
         signInWithPopup, GoogleAuthProvider
       } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
@@ -45,7 +45,7 @@
         initializeApp, getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, deleteField,
         onSnapshot, runTransaction, writeBatch, query, where, getDocs, getDoc, setDoc, enableIndexedDbPersistence,
         orderBy, limit, startAfter, documentId,
-        getAuth, onAuthStateChanged, signOut, signInAnonymously,
+        getAuth, onAuthStateChanged, signOut,
         createUserWithEmailAndPassword, signInWithEmailAndPassword,
         signInWithPopup, GoogleAuthProvider
       };
@@ -157,21 +157,40 @@
         const { doc, getDoc, setDoc } = window.FirebaseLib;
         const ref = doc(db, 'users', user.uid);
         const snap = await getDoc(ref);
-        if (snap.exists()) return snap.data();
+        if (snap.exists()) {
+          const data = snap.data();
+          if (!user.isAnonymous && data.isGuest) {
+            await setDoc(ref, { isGuest: false, email: user.email || data.email || '' }, { merge: true });
+            return { ...data, isGuest: false, email: user.email || data.email || '' };
+          }
+          return data;
+        }
         const profile = {
           email: user.email || '',
           householdId: null,
           createdAt: new Date().toISOString(),
-          isGuest: !!user.isAnonymous,
+          isGuest: false,
         };
         await setDoc(ref, profile);
         return profile;
+      };
+
+      const stashPendingJoinCode = (code) => {
+        const trimmed = (code || '').trim();
+        if (trimmed) sessionStorage.setItem('meuAcertoPendingJoinCode', trimmed);
       };
 
       const linkUserToHousehold = async (db, uid, householdId) => {
         if (!db || !uid) return;
         const { doc, setDoc } = window.FirebaseLib;
         await setDoc(doc(db, 'users', uid), { householdId: householdId || null }, { merge: true });
+      };
+
+      const isUserMemberOfHousehold = async (db, uid, householdId) => {
+        if (!db || !uid || !householdId) return false;
+        const { doc, getDoc } = window.FirebaseLib;
+        const snap = await getDoc(doc(db, 'households', householdId));
+        return snap.exists() && uid in (snap.data().members || {});
       };
 
       const isHouseholdOwner = async (db, householdId, uid) => {
@@ -216,7 +235,7 @@
 
       const joinHousehold = async (db, uid, householdId) => {
         if (!db || !uid || !householdId) throw new Error('INVALID');
-        const { doc, getDoc, runTransaction } = window.FirebaseLib;
+        const { doc, runTransaction } = window.FirebaseLib;
         const ref = doc(db, 'households', householdId);
         let householdData = null;
 
@@ -224,13 +243,27 @@
           const snap = await transaction.get(ref);
           if (!snap.exists()) throw new Error('NOT_FOUND');
           const data = snap.data();
-          const members = { ...(data.members || {}) };
+          let members = { ...(data.members || {}) };
 
-          if (!members[uid]) {
-            if (Object.keys(members).length >= 2) throw new Error('FULL');
-            members[uid] = 'member';
-            transaction.update(ref, { members });
+          if (members[uid]) {
+            householdData = { ...data, members };
+            return;
           }
+
+          // Libera vaga removendo convites anônimos antigos (só no mapa members)
+          for (const memberUid of Object.keys(members)) {
+            if (memberUid === uid) continue;
+            const userRef = doc(db, 'users', memberUid);
+            const userSnap = await transaction.get(userRef);
+            if (userSnap.exists() && userSnap.data().isGuest) {
+              delete members[memberUid];
+            }
+          }
+
+          if (Object.keys(members).length >= 2) throw new Error('FULL');
+
+          members[uid] = 'member';
+          transaction.update(ref, { members });
           householdData = { ...data, members };
         });
 
@@ -837,6 +870,15 @@
         </button>
       );
 
+      const BackIconButton = ({ onClick, className = '' }) => (
+        <button onClick={onClick} title="Voltar"
+          className={`p-2 text-slate-400 hover:text-slate-600 dark:hover:text-slate-300 rounded-lg hover:bg-slate-200/60 dark:hover:bg-slate-800 transition-colors ${className}`}>
+          <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M15 19l-7-7 7-7" />
+          </svg>
+        </button>
+      );
+
       const FamilyCodeBlock = ({ code, copied, onCopy, compact }) => (
         <div className={`bg-slate-50 dark:bg-slate-800/80 border border-slate-200 dark:border-slate-700 rounded-xl ${compact ? 'p-3' : 'p-4'}`}>
           <p className="text-xs font-medium text-slate-600 dark:text-slate-300 mb-1">Código da família</p>
@@ -869,6 +911,7 @@
 
         const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
         const validPassword = password.length >= 8;
+        const hasFamilyCode = !!familyCode.trim();
 
         const handleEmailAuth = async () => {
           if (!validEmail || !validPassword) return;
@@ -876,6 +919,7 @@
           setLoading(true);
           const fb = window.FirebaseLib;
           try {
+            if (hasFamilyCode) stashPendingJoinCode(familyCode);
             if (mode === 'register') {
               const cred = await fb.createUserWithEmailAndPassword(auth, email.trim(), password);
               await ensureUserProfile(window._meuAcertoDb, cred.user);
@@ -883,6 +927,7 @@
               await fb.signInWithEmailAndPassword(auth, email.trim(), password);
             }
           } catch (e) {
+            if (hasFamilyCode) sessionStorage.removeItem('meuAcertoPendingJoinCode');
             setError(authErrorMessage(e.code));
           } finally {
             setLoading(false);
@@ -894,33 +939,14 @@
           setLoading(true);
           const fb = window.FirebaseLib;
           try {
+            if (hasFamilyCode) stashPendingJoinCode(familyCode);
             const provider = new fb.GoogleAuthProvider();
             const cred = await fb.signInWithPopup(auth, provider);
             await ensureUserProfile(window._meuAcertoDb, cred.user);
           } catch (e) {
+            if (hasFamilyCode) sessionStorage.removeItem('meuAcertoPendingJoinCode');
             setError(authErrorMessage(e.code));
           } finally {
-            setLoading(false);
-          }
-        };
-
-        const handleJoinWithCode = async () => {
-          const code = familyCode.trim();
-          if (!code) return;
-          setError('');
-          setLoading(true);
-          const fb = window.FirebaseLib;
-          try {
-            sessionStorage.setItem('meuAcertoPendingJoinCode', code);
-            await fb.signInAnonymously(auth);
-          } catch (e) {
-            sessionStorage.removeItem('meuAcertoPendingJoinCode');
-            console.error(e);
-            if (e.code === 'auth/operation-not-allowed') {
-              setError('Acesso convidado desativado. Ative Login anônimo no Firebase ou use conta Google/e-mail.');
-            } else {
-              setError('Erro ao entrar com código. Tente novamente.');
-            }
             setLoading(false);
           }
         };
@@ -929,24 +955,16 @@
           <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
             <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
             <p className="text-sm text-slate-600 dark:text-slate-400 mb-6 text-center max-w-sm">
-              Crie uma conta para configurar a família, ou entre só com o código compartilhado
+              Crie uma conta para configurar a família, ou vincule-se com o código compartilhado
             </p>
             <div className="w-full max-w-sm space-y-4">
               <div className="bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 rounded-xl p-4 space-y-3">
-                <p className="text-sm font-medium text-slate-700 dark:text-slate-200">Entrar com código da família</p>
-                <p className="text-xs text-slate-500">Sem cadastro — use o código que quem criou a família compartilhou</p>
+                <p className="text-sm font-medium text-slate-700 dark:text-slate-200">Código da família</p>
+                <p className="text-xs text-slate-500">
+                  Cole o código e depois crie conta ou entre abaixo — sua conta ficará vinculada à família
+                </p>
                 <input className={ui.input} placeholder="Cole o código da família"
                   value={familyCode} onChange={(e) => setFamilyCode(e.target.value)} />
-                <button disabled={!familyCode.trim() || loading} onClick={handleJoinWithCode}
-                  className="w-full py-3 rounded-xl bg-emerald-600 text-white font-semibold disabled:opacity-50 hover:bg-emerald-700">
-                  {loading && familyCode.trim() ? 'Entrando...' : 'Entrar com código'}
-                </button>
-              </div>
-
-              <div className="flex items-center gap-3">
-                <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
-                <span className="text-xs text-slate-400">ou crie / entre com conta</span>
-                <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
               </div>
 
               <div className="flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1">
@@ -972,7 +990,11 @@
               {error && <p className="text-sm text-red-500 text-center">{error}</p>}
               <button disabled={!validEmail || !validPassword || loading} onClick={handleEmailAuth}
                 className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
-                {loading && validEmail && validPassword && !familyCode.trim() ? 'Aguarde...' : (mode === 'register' ? 'Criar conta' : 'Entrar')}
+                {loading ? 'Aguarde...' : (
+                  hasFamilyCode
+                    ? (mode === 'register' ? 'Criar conta e vincular' : 'Entrar e vincular')
+                    : (mode === 'register' ? 'Criar conta' : 'Entrar')
+                )}
               </button>
               <div className="flex items-center gap-3">
                 <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
@@ -981,7 +1003,7 @@
               </div>
               <button disabled={loading} onClick={handleGoogle}
                 className="w-full py-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">
-                Continuar com Google
+                {hasFamilyCode ? 'Google e vincular à família' : 'Continuar com Google'}
               </button>
             </div>
           </div>
@@ -1126,12 +1148,20 @@
 
         if (step === 'names') {
           const familyCode = householdId || existingConfig?.householdId || '';
+          const backFromSettings = existingConfig?.setupComplete;
           return (
-            <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+            <div className="min-h-screen relative flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+              <BackIconButton
+                onClick={() => setStep(backFromSettings ? 'select' : (mode === 'join' ? 'join' : 'welcome'))}
+                className="absolute top-4 left-4"
+              />
+              {backFromSettings && onSignOut && (
+                <LogoutIconButton onClick={onSignOut} className="absolute top-4 right-4" />
+              )}
               <h1 className="text-2xl font-bold mb-2 text-slate-800 dark:text-white">Nomes</h1>
               <p className="text-sm text-slate-600 dark:text-slate-400 mb-6 text-center">Quem são as duas pessoas?</p>
               <div className="w-full max-w-sm space-y-4">
-                {existingConfig?.setupComplete && familyCode && (
+                {backFromSettings && familyCode && (
                   <FamilyCodeBlock code={familyCode} copied={copied} onCopy={copyCode} compact />
                 )}
                 <div>
@@ -1146,18 +1176,20 @@
                   className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
                   Continuar
                 </button>
-                {!existingConfig?.setupComplete && (
-                  <button onClick={() => setStep(mode === 'join' ? 'join' : 'welcome')} className="w-full text-sm text-slate-500">Voltar</button>
-                )}
               </div>
             </div>
           );
         }
 
         if (step === 'cards') {
+          const backFromSettings = existingConfig?.setupComplete;
           return (
-            <div className="min-h-screen flex flex-col p-6 bg-slate-50 dark:bg-slate-900 max-w-lg mx-auto">
-              <h1 className="text-2xl font-bold mb-2 text-slate-800 dark:text-white">Cartões</h1>
+            <div className="min-h-screen relative flex flex-col p-6 bg-slate-50 dark:bg-slate-900 max-w-lg mx-auto">
+              <BackIconButton onClick={() => setStep('names')} className="absolute top-4 left-4" />
+              {backFromSettings && onSignOut && (
+                <LogoutIconButton onClick={onSignOut} className="absolute top-4 right-4" />
+              )}
+              <h1 className="text-2xl font-bold mb-2 mt-8 text-slate-800 dark:text-white">Cartões</h1>
               <p className="text-sm text-slate-600 dark:text-slate-400 mb-4">Adicione quantos cartões quiser e indique o dono de cada um.</p>
               <div className="space-y-3 flex-1 overflow-y-auto mb-4">
                 {cards.map((c) => (
@@ -1186,7 +1218,6 @@
               }} className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
                 Continuar
               </button>
-              <button onClick={() => setStep('names')} className="mt-2 text-sm text-slate-500">Voltar</button>
             </div>
           );
         }
@@ -2373,23 +2404,45 @@
 
                 if (pendingJoin) {
                   sessionStorage.removeItem('meuAcertoPendingJoinCode');
-                  try {
-                    const cfg = await joinHousehold(dbInstance, u.uid, pendingJoin);
-                    saveAppConfig(u.uid, cfg);
-                    setConfig(cfg);
-                    setUserProfile({ ...profile, householdId: cfg.householdId });
-                    setIsOwner(false);
-                    setActivePanel(null);
-                  } catch (joinErr) {
-                    console.error(joinErr);
+                  if (profile?.householdId && profile.householdId !== pendingJoin) {
                     await window.FirebaseLib.signOut(authInstance).catch(() => {});
-                    sessionStorage.setItem('meuAcertoJoinError',
-                      joinErr.message === 'NOT_FOUND' ? 'Código não encontrado. Confira se copiou certo.'
-                      : joinErr.message === 'FULL' ? 'Esta família já tem 2 membros.'
-                      : 'Erro ao entrar com código. Tente novamente.');
+                    sessionStorage.setItem('meuAcertoJoinError', 'Esta conta já pertence a outra família.');
                     return;
                   }
+                  if (profile?.householdId === pendingJoin) {
+                    const cloudCfg = await loadHouseholdFromCloud(dbInstance, pendingJoin);
+                    if (cloudCfg) {
+                      saveAppConfig(u.uid, cloudCfg);
+                      setConfig(cloudCfg);
+                      setUserProfile(profile);
+                      setIsOwner(await isHouseholdOwner(dbInstance, pendingJoin, u.uid));
+                      setActivePanel(loadActivePanel(u.uid));
+                    }
+                  } else {
+                    try {
+                      const cfg = await joinHousehold(dbInstance, u.uid, pendingJoin);
+                      saveAppConfig(u.uid, cfg);
+                      setConfig(cfg);
+                      setUserProfile({ ...profile, householdId: cfg.householdId, isGuest: false });
+                      setIsOwner(false);
+                      setActivePanel(null);
+                    } catch (joinErr) {
+                      console.error(joinErr);
+                      await window.FirebaseLib.signOut(authInstance).catch(() => {});
+                      sessionStorage.setItem('meuAcertoJoinError',
+                        joinErr.message === 'NOT_FOUND' ? 'Código não encontrado. Confira se copiou certo.'
+                        : joinErr.message === 'FULL' ? 'Esta família já tem 2 membros com conta.'
+                        : 'Erro ao vincular à família. Tente novamente.');
+                      return;
+                    }
+                  }
                 } else if (profile?.householdId) {
+                  const stillMember = await isUserMemberOfHousehold(dbInstance, u.uid, profile.householdId);
+                  if (!stillMember) {
+                    await linkUserToHousehold(dbInstance, u.uid, null);
+                    profile = { ...profile, householdId: null };
+                  }
+                  if (profile.householdId) {
                   const cloudCfg = await loadHouseholdFromCloud(dbInstance, profile.householdId);
                   if (cloudCfg) {
                     saveAppConfig(u.uid, cloudCfg);
@@ -2402,6 +2455,13 @@
                     clearUserLocalData(u.uid);
                     await linkUserToHousehold(dbInstance, u.uid, null);
                     setUserProfile({ ...profile, householdId: null });
+                    setConfig(null);
+                    setActivePanel(null);
+                    setIsOwner(false);
+                  }
+                  } else {
+                    setUserProfile(profile);
+                    clearUserLocalData(u.uid);
                     setConfig(null);
                     setActivePanel(null);
                     setIsOwner(false);

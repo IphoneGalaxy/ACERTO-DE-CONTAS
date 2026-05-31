@@ -15,7 +15,7 @@ service cloud.firestore {
     }
 
     function isMember(hid) {
-      return isAuthed()
+      return isRegistered()
         && hid is string
         && request.auth.uid in householdDoc(hid).data.members;
     }
@@ -38,50 +38,56 @@ service cloud.firestore {
     function isValidJoin(hid) {
       let oldMembers = resource.data.members;
       let newMembers = request.resource.data.members;
-      return isAuthed()
+      let ownerId = resource.data.createdBy;
+      return isRegistered()
         && !(request.auth.uid in oldMembers)
         && request.auth.uid in newMembers
         && newMembers[request.auth.uid] == 'member'
         && newMembers.size() <= 2
-        && oldMembers.size() < 2
-        && request.resource.data.createdBy == resource.data.createdBy
+        && ownerId in newMembers
+        && newMembers[ownerId] == 'owner'
+        && request.resource.data.createdBy == ownerId
         && request.resource.data.householdId == resource.data.householdId;
     }
 
     match /users/{userId} {
-      allow read, write: if isAuthed() && request.auth.uid == userId;
+      allow read: if isRegistered() && (
+        request.auth.uid == userId
+        || resource.data.isGuest == true
+      );
+      allow write: if isRegistered() && request.auth.uid == userId;
     }
 
     match /expenses/{docId} {
-      allow read: if isAuthed() && isMember(resource.data.householdId);
-      allow create: if isAuthed()
+      allow read: if isRegistered() && isMember(resource.data.householdId);
+      allow create: if isRegistered()
         && hasHouseholdId()
         && isMember(request.resource.data.householdId);
-      allow update: if isAuthed()
+      allow update: if isRegistered()
         && isMember(resource.data.householdId)
         && keepsHouseholdId();
-      allow delete: if isAuthed() && isMember(resource.data.householdId);
+      allow delete: if isRegistered() && isMember(resource.data.householdId);
     }
 
     match /installmentPlans/{docId} {
-      allow read: if isAuthed() && isMember(resource.data.householdId);
-      allow create: if isAuthed()
+      allow read: if isRegistered() && isMember(resource.data.householdId);
+      allow create: if isRegistered()
         && hasHouseholdId()
         && isMember(request.resource.data.householdId);
-      allow update: if isAuthed()
+      allow update: if isRegistered()
         && isMember(resource.data.householdId)
         && keepsHouseholdId();
-      allow delete: if isAuthed() && isMember(resource.data.householdId);
+      allow delete: if isRegistered() && isMember(resource.data.householdId);
     }
 
     match /households/{householdId} {
-      allow get: if isAuthed();
+      allow get: if isRegistered();
       allow list: if false;
       allow create: if isRegistered()
         && request.resource.data.createdBy == request.auth.uid
         && request.resource.data.members[request.auth.uid] == 'owner'
         && request.resource.data.householdId == householdId;
-      allow update: if isAuthed() && (
+      allow update: if isRegistered() && (
         (isMember(householdId)
           && request.resource.data.createdBy == resource.data.createdBy
           && request.resource.data.householdId == resource.data.householdId)

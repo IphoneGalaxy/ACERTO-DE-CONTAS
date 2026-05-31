@@ -22,10 +22,10 @@ Meu Acerto é uma aplicação web para gerenciamento de despesas compartilhadas 
 5. **Copie o código da família** e compartilhe com a outra pessoa
 6. Escolha quem está usando o app agora
 
-No segundo dispositivo: cole o **código da família** na tela inicial (sem cadastro) ou crie conta e entre com o código.
+No segundo dispositivo: cole o **código da família**, depois **crie conta ou entre** com Google/e-mail — a conta fica vinculada e funciona em qualquer aparelho.
 
-- **Quem cria a família**: precisa de conta (Google ou e-mail/senha)
-- **Quem só entra com código**: não precisa cadastro — use **Entrar com código** na tela inicial
+- **Quem cria a família**: conta Google ou e-mail/senha
+- **Quem entra com código**: cola o código + cria conta ou entra — o código vincula à família
 
 Cada conta pode pertencer a **uma família por vez**. O criador pode **excluir a família** (apaga todos os dados) e criar outra.
 
@@ -48,7 +48,7 @@ O deploy é automático via GitHub Actions ao enviar alterações para `main`.
 2. **Authentication → Provedores**
    - Ative **E-mail/Senha**
    - Ative **Google** (informe e-mail de suporte)
-   - Ative **Anônimo** (necessário para entrar só com código, sem cadastro)
+   - **Desative Login anônimo** (não é mais usado)
 3. **Authentication → Settings → Authorized domains**
    - Confirme `localhost`
    - Adicione `iphonegalaxy.github.io`
