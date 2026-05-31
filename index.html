@@ -32,7 +32,7 @@
       import { initializeApp } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-app.js";
       import { 
         getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, deleteField,
-        onSnapshot, runTransaction, writeBatch, query, where, getDocs, 
+        onSnapshot, runTransaction, writeBatch, query, where, getDocs, getDoc, setDoc,
         enableIndexedDbPersistence, orderBy, limit, startAfter, documentId 
       } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
       import { 
@@ -41,7 +41,7 @@
 
       window.FirebaseLib = {
         initializeApp, getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, deleteField,
-        onSnapshot, runTransaction, writeBatch, query, where, getDocs, enableIndexedDbPersistence,
+        onSnapshot, runTransaction, writeBatch, query, where, getDocs, getDoc, setDoc, enableIndexedDbPersistence,
         orderBy, limit, startAfter, documentId,
         getAuth, signInAnonymously, onAuthStateChanged
       };
@@ -102,6 +102,45 @@
 
       const saveAppConfig = (cfg) => {
         try { localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(cfg)); } catch {}
+      };
+
+      const buildConfig = (hid, personAName, personBName, cards) => ({
+        householdId: hid,
+        personA: { name: personAName.trim() },
+        personB: { name: personBName.trim() },
+        cards: (cards || []).map((c) => ({
+          id: c.id || generateId(),
+          label: c.label.trim(),
+          last4: String(c.last4).trim(),
+          owner: c.owner || 'personA',
+        })),
+        setupComplete: true,
+      });
+
+      const saveHouseholdToCloud = async (db, cfg) => {
+        if (!db || !window.FirebaseLib || !cfg?.householdId) return;
+        const { doc, setDoc } = window.FirebaseLib;
+        await setDoc(doc(db, 'households', cfg.householdId), {
+          householdId: cfg.householdId,
+          personA: cfg.personA,
+          personB: cfg.personB,
+          cards: cfg.cards || [],
+          setupComplete: true,
+        }, { merge: true });
+      };
+
+      const loadHouseholdFromCloud = async (db, householdId) => {
+        if (!db || !window.FirebaseLib || !householdId) return null;
+        const { doc, getDoc } = window.FirebaseLib;
+        const snap = await getDoc(doc(db, 'households', householdId));
+        if (!snap.exists()) return null;
+        const d = snap.data();
+        return buildConfig(
+          householdId,
+          d.personA?.name || 'Pessoa 1',
+          d.personB?.name || 'Pessoa 2',
+          d.cards || []
+        );
       };
 
       const nameA = (cfg) => (cfg?.personA?.name || 'Pessoa 1').trim();
@@ -658,7 +697,7 @@
         );
       };
 
-      const SetupWizard = ({ onComplete, existingConfig, initialStep }) => {
+      const SetupWizard = ({ onComplete, existingConfig, initialStep, db }) => {
         const [step, setStep] = useState(initialStep || (existingConfig?.setupComplete ? 'select' : 'welcome'));
         const [mode, setMode] = useState('create');
         const [joinCode, setJoinCode] = useState('');
@@ -667,6 +706,9 @@
         const [cards, setCards] = useState(existingConfig?.cards?.length ? existingConfig.cards : []);
         const [householdId, setHouseholdId] = useState(existingConfig?.householdId || '');
         const [copied, setCopied] = useState(false);
+        const [joinLoading, setJoinLoading] = useState(false);
+        const [joinError, setJoinError] = useState('');
+        const [saveError, setSaveError] = useState('');
 
         const addCard = () => {
           setCards((prev) => [...prev, { id: generateId(), label: '', last4: '', owner: 'personA' }]);
@@ -687,26 +729,48 @@
           c.label.trim() && /^\d{4}$/.test(String(c.last4 || '').trim())
         );
 
-        const finishConfig = () => {
+        const finishConfig = async () => {
           const hid = mode === 'join' && joinCode.trim()
             ? joinCode.trim()
             : (householdId || generateId());
-          const cfg = {
-            householdId: hid,
-            personA: { name: personAName.trim() },
-            personB: { name: personBName.trim() },
-            cards: cards.map((c) => ({
-              id: c.id || generateId(),
-              label: c.label.trim(),
-              last4: String(c.last4).trim(),
-              owner: c.owner || 'personA',
-            })),
-            setupComplete: true,
-          };
-          saveAppConfig(cfg);
-          setHouseholdId(hid);
-          onComplete(cfg);
-          setStep('select');
+          const cfg = buildConfig(hid, personAName, personBName, cards);
+          setSaveError('');
+          try {
+            await saveHouseholdToCloud(db, cfg);
+            saveAppConfig(cfg);
+            setHouseholdId(hid);
+            onComplete(cfg);
+            setStep('select');
+          } catch (e) {
+            console.error(e);
+            setSaveError('Erro ao salvar família na nuvem. Verifique a conexão e tente novamente.');
+          }
+        };
+
+        const handleJoinContinue = async () => {
+          const code = joinCode.trim();
+          if (!code) return;
+          setJoinLoading(true);
+          setJoinError('');
+          try {
+            const cfg = await loadHouseholdFromCloud(db, code);
+            if (!cfg) {
+              setJoinError('Código não encontrado. Confira se copiou certo e se a família já foi criada no outro aparelho.');
+              return;
+            }
+            saveAppConfig(cfg);
+            setHouseholdId(code);
+            setPersonAName(nameA(cfg));
+            setPersonBName(nameB(cfg));
+            setCards(cfg.cards);
+            onComplete(cfg);
+            setStep('select');
+          } catch (e) {
+            console.error(e);
+            setJoinError('Erro ao buscar família. Tente novamente.');
+          } finally {
+            setJoinLoading(false);
+          }
         };
 
         const copyCode = async () => {
@@ -745,9 +809,10 @@
               </p>
               <input className={ui.input + ' max-w-sm mb-4'} placeholder="UUID da família"
                 value={joinCode} onChange={(e) => setJoinCode(e.target.value)} />
-              <button disabled={!joinCode.trim()} onClick={() => { setHouseholdId(joinCode.trim()); setStep('names'); }}
+              {joinError && <p className="text-sm text-red-500 mb-4 text-center max-w-sm">{joinError}</p>}
+              <button disabled={!joinCode.trim() || joinLoading} onClick={handleJoinContinue}
                 className="w-full max-w-sm py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
-                Continuar
+                {joinLoading ? 'Buscando família...' : 'Continuar'}
               </button>
               <button onClick={() => setStep('welcome')} className="mt-4 text-sm text-slate-500 hover:text-slate-700">Voltar</button>
             </div>
@@ -834,12 +899,13 @@
               <button onClick={finishConfig} className="w-full max-w-sm py-3 rounded-xl bg-indigo-600 text-white font-semibold">
                 Continuar
               </button>
+              {saveError && <p className="text-sm text-red-500 mt-3 text-center max-w-sm">{saveError}</p>}
             </div>
           );
         }
 
         // step === 'select'
-        const cfg = existingConfig || loadAppConfig();
+        const cfg = existingConfig?.setupComplete ? existingConfig : loadAppConfig();
         return (
           <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
             <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
@@ -861,7 +927,7 @@
         );
       };
 
-      const SettingsModal = ({ isOpen, onClose, config, onSave }) => {
+      const SettingsModal = ({ isOpen, onClose, config, onSave, db }) => {
         const [personAName, setPersonAName] = useState(nameA(config));
         const [personBName, setPersonBName] = useState(nameB(config));
         const [cards, setCards] = useState(config?.cards || []);
@@ -880,21 +946,17 @@
         const updateCard = (id, field, value) => setCards((p) => p.map((c) => c.id === id ? { ...c, [field]: value } : c));
         const removeCard = (id) => setCards((p) => p.filter((c) => c.id !== id));
 
-        const handleSave = () => {
-          const updated = {
-            ...config,
-            personA: { name: personAName.trim() },
-            personB: { name: personBName.trim() },
-            cards: cards.map((c) => ({
-              id: c.id || generateId(),
-              label: c.label.trim(),
-              last4: String(c.last4).trim(),
-              owner: c.owner || 'personA',
-            })),
-          };
-          saveAppConfig(updated);
-          onSave(updated);
-          onClose();
+        const handleSave = async () => {
+          const updated = buildConfig(config.householdId, personAName, personBName, cards);
+          try {
+            await saveHouseholdToCloud(db, updated);
+            saveAppConfig(updated);
+            onSave(updated);
+            onClose();
+          } catch (e) {
+            console.error(e);
+            alert('Erro ao salvar configurações na nuvem. Tente novamente.');
+          }
         };
 
         return (
@@ -1885,6 +1947,7 @@
                 onClose={() => setIsSettingsOpen(false)}
                 config={config}
                 onSave={onConfigChange}
+                db={db}
               />
           </div>
         );
@@ -1955,9 +2018,11 @@
           try { localStorage.removeItem(PANEL_STORAGE_KEY); } catch {}
         };
 
-        const handleConfigChange = (updated) => {
-          setConfig(updated);
-        };
+        useEffect(() => {
+          if (db && config?.setupComplete && config?.householdId) {
+            saveHouseholdToCloud(db, config).catch(() => {});
+          }
+        }, [db, config?.householdId]);
 
         if (firebaseError) {
           return (
@@ -1984,6 +2049,7 @@
               existingConfig={config}
               initialStep={config?.setupComplete ? 'select' : undefined}
               onComplete={handleSetupComplete}
+              db={db}
             />
           );
         }
@@ -1993,7 +2059,10 @@
             activePanel={activePanel}
             config={config}
             onLogout={handleLogout}
-            onConfigChange={handleConfigChange}
+            onConfigChange={async (updated) => {
+              setConfig(updated);
+              try { await saveHouseholdToCloud(db, updated); } catch (e) { console.error(e); }
+            }}
             db={db}
             householdId={config.householdId}
           />

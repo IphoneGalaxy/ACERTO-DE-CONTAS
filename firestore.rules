@@ -35,5 +35,14 @@ service cloud.firestore {
       allow delete: if isAuthed()
         && resource.data.householdId is string;
     }
+
+    match /households/{householdId} {
+      allow read: if isAuthed();
+      allow create: if isAuthed()
+        && request.resource.data.householdId == householdId;
+      allow update: if isAuthed()
+        && resource.data.householdId == householdId
+        && request.resource.data.householdId == householdId;
+    }
   }
 }

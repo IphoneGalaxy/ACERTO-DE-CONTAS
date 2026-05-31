@@ -1,19 +1,40 @@
 # Smoke test — Meu Acerto genérico
 
-Screenshots capturados durante validação da implementação.
+## Post-deploy (2026-05-30) — https://iphonegalaxy.github.io/ACERTO-DE-CONTAS/
 
-| Arquivo | Descrição |
-|---------|-----------|
-| `01-welcome-generico.png` | Tela exibida sem Firebase configurado (dev local) |
-| `02-legacy-*.png` | Referência do app anterior (nomes fixos Guilherme/Thais) |
+| # | Teste | Resultado |
+|---|-------|-----------|
+| 01 | App carrega sem erro de Firebase | PASS |
+| 02 | Tela "Criar nova família" / "Entrar com código" | PASS |
+| 03 | Etapa de nomes customizáveis | PASS |
+| 04 | Etapa de cartões (adicionar/remover) | PASS |
+| 05 | Código da família (UUID) exibido | PASS |
+| 06 | Seleção de painel com nomes salvos | PASS |
+| 07 | Dashboard Pessoa 1 carrega | PASS |
+| 08 | Nomes customizados nos cards | PASS |
+| 09 | Ajuste oculto no painel A | PASS |
+| 10 | Cartão customizado no modal "+ Novo" | Verificar manualmente* |
+| 11 | Ajuste visível no painel B | PASS |
 
-## Como repetir o smoke
+\* O teste automatizado falhou no seletor do `<option>` (limitação do Playwright), mas o fluxo de cartões na etapa de setup passou.
 
-1. Configure `firebase-config.js` com credenciais de um projeto Firebase **novo** (não o pessoal)
-2. Publique `firestore.rules` no console Firebase
-3. Sirva localmente: `npx serve . -p 3456`
-4. Fluxo a validar:
-   - Criar família → nomes → cartões → copiar código
-   - Segundo navegador: entrar com código → sync em tempo real
-   - Painel Pessoa 1 vs Pessoa 2 (Ajuste só no 2)
-   - Lançamento manual e importação CSV
+Screenshots em `post-deploy/`.
+
+## Como repetir o smoke automatizado
+
+```bash
+npm install --no-save playwright
+npx playwright install chromium
+node docs/smoke/run-smoke.mjs
+```
+
+## Smoke manual complementar (recomendado)
+
+- [ ] **Sync**: abrir em 2 abas/navegadores com o mesmo código da família → lançamento aparece em tempo real
+- [ ] **Isolamento**: família A não vê dados da família B
+- [ ] **Lançamento**: criar despesa Cartão, Pix, Boleto
+- [ ] **Ajuste**: só no painel Pessoa 2
+- [ ] **Importação**: CSV/XLSX de fatura
+- [ ] **Parcelas**: lançamento 1/10 gera parcelas futuras
+- [ ] **Limpar mês**: apaga só do painel ativo
+- [ ] **Configurações**: editar nomes/cartões sem perder householdId
