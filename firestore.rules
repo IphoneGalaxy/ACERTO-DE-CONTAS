@@ -1,8 +1,25 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    function isAuthed() {
-      return request.auth != null;
+    function isSignedIn() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider != 'anonymous';
+    }
+
+    function householdDoc(hid) {
+      return get(/databases/$(database)/documents/households/$(hid));
+    }
+
+    function isMember(hid) {
+      return isSignedIn()
+        && hid is string
+        && request.auth.uid in householdDoc(hid).data.members;
+    }
+
+    function isOwner(hid) {
+      return isSignedIn()
+        && hid is string
+        && householdDoc(hid).data.createdBy == request.auth.uid;
     }
 
     function hasHouseholdId() {
@@ -14,35 +31,59 @@ service cloud.firestore {
       return resource.data.householdId == request.resource.data.householdId;
     }
 
+    function isValidJoin(hid) {
+      let oldMembers = resource.data.members;
+      let newMembers = request.resource.data.members;
+      return isSignedIn()
+        && !(request.auth.uid in oldMembers)
+        && request.auth.uid in newMembers
+        && newMembers[request.auth.uid] == 'member'
+        && newMembers.size() <= 2
+        && oldMembers.size() < 2
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.householdId == resource.data.householdId;
+    }
+
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
     match /expenses/{docId} {
-      allow read: if isAuthed()
-        && resource.data.householdId is string;
-      allow create: if isAuthed() && hasHouseholdId();
-      allow update: if isAuthed()
-        && resource.data.householdId is string
+      allow read: if isSignedIn() && isMember(resource.data.householdId);
+      allow create: if isSignedIn()
+        && hasHouseholdId()
+        && isMember(request.resource.data.householdId);
+      allow update: if isSignedIn()
+        && isMember(resource.data.householdId)
         && keepsHouseholdId();
-      allow delete: if isAuthed()
-        && resource.data.householdId is string;
+      allow delete: if isSignedIn() && isMember(resource.data.householdId);
     }
 
     match /installmentPlans/{docId} {
-      allow read: if isAuthed()
-        && resource.data.householdId is string;
-      allow create: if isAuthed() && hasHouseholdId();
-      allow update: if isAuthed()
-        && resource.data.householdId is string
+      allow read: if isSignedIn() && isMember(resource.data.householdId);
+      allow create: if isSignedIn()
+        && hasHouseholdId()
+        && isMember(request.resource.data.householdId);
+      allow update: if isSignedIn()
+        && isMember(resource.data.householdId)
         && keepsHouseholdId();
-      allow delete: if isAuthed()
-        && resource.data.householdId is string;
+      allow delete: if isSignedIn() && isMember(resource.data.householdId);
     }
 
     match /households/{householdId} {
-      allow read: if isAuthed();
-      allow create: if isAuthed()
+      allow get: if isSignedIn();
+      allow list: if false;
+      allow create: if isSignedIn()
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.members[request.auth.uid] == 'owner'
         && request.resource.data.householdId == householdId;
-      allow update: if isAuthed()
-        && resource.data.householdId == householdId
-        && request.resource.data.householdId == householdId;
+      allow update: if isSignedIn() && (
+        (isMember(householdId)
+          && request.resource.data.createdBy == resource.data.createdBy
+          && request.resource.data.householdId == resource.data.householdId)
+        || isValidJoin(householdId)
+      );
+      allow delete: if isSignedIn() && isOwner(householdId);
     }
   }
 }

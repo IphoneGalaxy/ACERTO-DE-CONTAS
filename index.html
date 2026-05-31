@@ -36,14 +36,18 @@
         enableIndexedDbPersistence, orderBy, limit, startAfter, documentId 
       } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-firestore.js";
       import { 
-        getAuth, signInAnonymously, onAuthStateChanged 
+        getAuth, onAuthStateChanged, signOut,
+        createUserWithEmailAndPassword, signInWithEmailAndPassword,
+        signInWithPopup, GoogleAuthProvider
       } from "https://www.gstatic.com/firebasejs/10.12.4/firebase-auth.js";
 
       window.FirebaseLib = {
         initializeApp, getFirestore, collection, doc, addDoc, updateDoc, deleteDoc, deleteField,
         onSnapshot, runTransaction, writeBatch, query, where, getDocs, getDoc, setDoc, enableIndexedDbPersistence,
         orderBy, limit, startAfter, documentId,
-        getAuth, signInAnonymously, onAuthStateChanged
+        getAuth, onAuthStateChanged, signOut,
+        createUserWithEmailAndPassword, signInWithEmailAndPassword,
+        signInWithPopup, GoogleAuthProvider
       };
     </script>
     <style>
@@ -81,8 +85,8 @@
       };
 
       /* ========= App Config ========= */
-      const CONFIG_STORAGE_KEY = 'meuAcertoAppConfig';
-      const PANEL_STORAGE_KEY = 'meuAcertoActivePanel';
+      const configStorageKey = (uid) => `meuAcertoAppConfig_${uid}`;
+      const panelStorageKey = (uid) => `meuAcertoActivePanel_${uid}`;
 
       const generateId = () => {
         if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
@@ -92,16 +96,88 @@
         });
       };
 
-      const loadAppConfig = () => {
+      const loadAppConfig = (uid) => {
+        if (!uid) return null;
         try {
-          const raw = localStorage.getItem(CONFIG_STORAGE_KEY);
+          const raw = localStorage.getItem(configStorageKey(uid));
           if (!raw) return null;
           return JSON.parse(raw);
         } catch { return null; }
       };
 
-      const saveAppConfig = (cfg) => {
-        try { localStorage.setItem(CONFIG_STORAGE_KEY, JSON.stringify(cfg)); } catch {}
+      const saveAppConfig = (uid, cfg) => {
+        if (!uid) return;
+        try { localStorage.setItem(configStorageKey(uid), JSON.stringify(cfg)); } catch {}
+      };
+
+      const loadActivePanel = (uid) => {
+        if (!uid) return null;
+        try { return localStorage.getItem(panelStorageKey(uid)) || null; } catch { return null; }
+      };
+
+      const saveActivePanel = (uid, panel) => {
+        if (!uid) return;
+        try {
+          if (panel) localStorage.setItem(panelStorageKey(uid), panel);
+          else localStorage.removeItem(panelStorageKey(uid));
+        } catch {}
+      };
+
+      const clearUserLocalData = (uid) => {
+        if (!uid) return;
+        try {
+          localStorage.removeItem(configStorageKey(uid));
+          localStorage.removeItem(panelStorageKey(uid));
+        } catch {}
+      };
+
+      const authErrorMessage = (code) => {
+        const map = {
+          'auth/email-already-in-use': 'Este e-mail já está cadastrado. Tente entrar.',
+          'auth/invalid-email': 'E-mail inválido.',
+          'auth/weak-password': 'A senha deve ter no mínimo 8 caracteres.',
+          'auth/user-not-found': 'E-mail ou senha incorretos.',
+          'auth/wrong-password': 'E-mail ou senha incorretos.',
+          'auth/invalid-credential': 'E-mail ou senha incorretos.',
+          'auth/popup-closed-by-user': 'Login com Google cancelado.',
+          'auth/too-many-requests': 'Muitas tentativas. Aguarde um momento.',
+        };
+        return map[code] || 'Erro ao autenticar. Tente novamente.';
+      };
+
+      const getUserProfile = async (db, uid) => {
+        if (!db || !window.FirebaseLib || !uid) return null;
+        const { doc, getDoc } = window.FirebaseLib;
+        const snap = await getDoc(doc(db, 'users', uid));
+        return snap.exists() ? snap.data() : null;
+      };
+
+      const ensureUserProfile = async (db, user) => {
+        if (!db || !user?.uid) return null;
+        const { doc, getDoc, setDoc } = window.FirebaseLib;
+        const ref = doc(db, 'users', user.uid);
+        const snap = await getDoc(ref);
+        if (snap.exists()) return snap.data();
+        const profile = {
+          email: user.email || '',
+          householdId: null,
+          createdAt: new Date().toISOString(),
+        };
+        await setDoc(ref, profile);
+        return profile;
+      };
+
+      const linkUserToHousehold = async (db, uid, householdId) => {
+        if (!db || !uid) return;
+        const { doc, setDoc } = window.FirebaseLib;
+        await setDoc(doc(db, 'users', uid), { householdId: householdId || null }, { merge: true });
+      };
+
+      const isHouseholdOwner = async (db, householdId, uid) => {
+        if (!db || !householdId || !uid) return false;
+        const { doc, getDoc } = window.FirebaseLib;
+        const snap = await getDoc(doc(db, 'households', householdId));
+        return snap.exists() && snap.data().createdBy === uid;
       };
 
       const buildConfig = (hid, personAName, personBName, cards) => ({
@@ -117,16 +193,81 @@
         setupComplete: true,
       });
 
-      const saveHouseholdToCloud = async (db, cfg) => {
+      const saveHouseholdToCloud = async (db, cfg, uid, options = {}) => {
         if (!db || !window.FirebaseLib || !cfg?.householdId) return;
         const { doc, setDoc } = window.FirebaseLib;
-        await setDoc(doc(db, 'households', cfg.householdId), {
+        const payload = {
           householdId: cfg.householdId,
           personA: cfg.personA,
           personB: cfg.personB,
           cards: cfg.cards || [],
           setupComplete: true,
-        }, { merge: true });
+        };
+        if (options.isCreate && uid) {
+          payload.createdBy = uid;
+          payload.members = { [uid]: 'owner' };
+        }
+        await setDoc(doc(db, 'households', cfg.householdId), payload, { merge: true });
+        if (options.isCreate && uid) {
+          await linkUserToHousehold(db, uid, cfg.householdId);
+        }
+      };
+
+      const joinHousehold = async (db, uid, householdId) => {
+        if (!db || !uid || !householdId) throw new Error('INVALID');
+        const { doc, getDoc, runTransaction } = window.FirebaseLib;
+        const ref = doc(db, 'households', householdId);
+        let householdData = null;
+
+        await runTransaction(db, async (transaction) => {
+          const snap = await transaction.get(ref);
+          if (!snap.exists()) throw new Error('NOT_FOUND');
+          const data = snap.data();
+          const members = { ...(data.members || {}) };
+
+          if (!members[uid]) {
+            if (Object.keys(members).length >= 2) throw new Error('FULL');
+            members[uid] = 'member';
+            transaction.update(ref, { members });
+          }
+          householdData = { ...data, members };
+        });
+
+        await linkUserToHousehold(db, uid, householdId);
+        return buildConfig(
+          householdId,
+          householdData.personA?.name || 'Pessoa 1',
+          householdData.personB?.name || 'Pessoa 2',
+          householdData.cards || []
+        );
+      };
+
+      const deleteHouseholdCascade = async (db, householdId) => {
+        if (!db || !householdId) return;
+        const { collection, query, where, getDocs, writeBatch, doc, getDoc, deleteDoc } = window.FirebaseLib;
+
+        const hSnap = await getDoc(doc(db, 'households', householdId));
+
+        const deleteByHousehold = async (collName) => {
+          const q = query(collection(db, collName), where('householdId', '==', householdId));
+          const snap = await getDocs(q);
+          let batch = writeBatch(db);
+          let count = 0;
+          for (const d of snap.docs) {
+            batch.delete(d.ref);
+            count++;
+            if (count >= 400) {
+              await batch.commit();
+              batch = writeBatch(db);
+              count = 0;
+            }
+          }
+          if (count > 0) await batch.commit();
+        };
+
+        await deleteByHousehold('expenses');
+        await deleteByHousehold('installmentPlans');
+        if (hSnap.exists()) await deleteDoc(doc(db, 'households', householdId));
       };
 
       const loadHouseholdFromCloud = async (db, householdId) => {
@@ -697,7 +838,97 @@
         );
       };
 
-      const SetupWizard = ({ onComplete, existingConfig, initialStep, db }) => {
+      const LoginScreen = ({ auth }) => {
+        const [mode, setMode] = useState('login');
+        const [email, setEmail] = useState('');
+        const [password, setPassword] = useState('');
+        const [error, setError] = useState('');
+        const [loading, setLoading] = useState(false);
+
+        const validEmail = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email.trim());
+        const validPassword = password.length >= 8;
+
+        const handleEmailAuth = async () => {
+          if (!validEmail || !validPassword) return;
+          setError('');
+          setLoading(true);
+          const fb = window.FirebaseLib;
+          try {
+            if (mode === 'register') {
+              const cred = await fb.createUserWithEmailAndPassword(auth, email.trim(), password);
+              await ensureUserProfile(window._meuAcertoDb, cred.user);
+            } else {
+              await fb.signInWithEmailAndPassword(auth, email.trim(), password);
+            }
+          } catch (e) {
+            setError(authErrorMessage(e.code));
+          } finally {
+            setLoading(false);
+          }
+        };
+
+        const handleGoogle = async () => {
+          setError('');
+          setLoading(true);
+          const fb = window.FirebaseLib;
+          try {
+            const provider = new fb.GoogleAuthProvider();
+            const cred = await fb.signInWithPopup(auth, provider);
+            await ensureUserProfile(window._meuAcertoDb, cred.user);
+          } catch (e) {
+            setError(authErrorMessage(e.code));
+          } finally {
+            setLoading(false);
+          }
+        };
+
+        return (
+          <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
+            <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
+            <p className="text-sm text-slate-600 dark:text-slate-400 mb-6 text-center max-w-sm">
+              Entre para criar ou acessar a família compartilhada
+            </p>
+            <div className="w-full max-w-sm space-y-4">
+              <div className="flex bg-slate-100 dark:bg-slate-800 rounded-xl p-1">
+                <button onClick={() => { setMode('login'); setError(''); }}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium ${mode === 'login' ? 'bg-white dark:bg-slate-700 shadow text-indigo-600' : 'text-slate-500'}`}>
+                  Entrar
+                </button>
+                <button onClick={() => { setMode('register'); setError(''); }}
+                  className={`flex-1 py-2 rounded-lg text-sm font-medium ${mode === 'register' ? 'bg-white dark:bg-slate-700 shadow text-indigo-600' : 'text-slate-500'}`}>
+                  Criar conta
+                </button>
+              </div>
+              <div>
+                <label className={ui.label}>E-mail</label>
+                <input type="email" className={ui.input} placeholder="seu@email.com"
+                  value={email} onChange={(e) => setEmail(e.target.value)} />
+              </div>
+              <div>
+                <label className={ui.label}>Senha (mín. 8 caracteres)</label>
+                <input type="password" className={ui.input} placeholder="••••••••"
+                  value={password} onChange={(e) => setPassword(e.target.value)} />
+              </div>
+              {error && <p className="text-sm text-red-500 text-center">{error}</p>}
+              <button disabled={!validEmail || !validPassword || loading} onClick={handleEmailAuth}
+                className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
+                {loading ? 'Aguarde...' : (mode === 'register' ? 'Criar conta' : 'Entrar')}
+              </button>
+              <div className="flex items-center gap-3">
+                <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
+                <span className="text-xs text-slate-400">ou</span>
+                <div className="flex-1 h-px bg-slate-200 dark:bg-slate-700" />
+              </div>
+              <button disabled={loading} onClick={handleGoogle}
+                className="w-full py-3 rounded-xl bg-white dark:bg-slate-800 border border-slate-200 dark:border-slate-700 text-slate-700 dark:text-slate-200 font-semibold hover:bg-slate-50 dark:hover:bg-slate-700 disabled:opacity-50">
+                Continuar com Google
+              </button>
+            </div>
+          </div>
+        );
+      };
+
+      const SetupWizard = ({ onComplete, existingConfig, initialStep, db, uid, userEmail, onSignOut }) => {
         const [step, setStep] = useState(initialStep || (existingConfig?.setupComplete ? 'select' : 'welcome'));
         const [mode, setMode] = useState('create');
         const [joinCode, setJoinCode] = useState('');
@@ -730,14 +961,12 @@
         );
 
         const finishConfig = async () => {
-          const hid = mode === 'join' && joinCode.trim()
-            ? joinCode.trim()
-            : (householdId || generateId());
+          const hid = householdId || generateId();
           const cfg = buildConfig(hid, personAName, personBName, cards);
           setSaveError('');
           try {
-            await saveHouseholdToCloud(db, cfg);
-            saveAppConfig(cfg);
+            await saveHouseholdToCloud(db, cfg, uid, { isCreate: true });
+            saveAppConfig(uid, cfg);
             setHouseholdId(hid);
             onComplete(cfg);
             setStep('select');
@@ -753,12 +982,8 @@
           setJoinLoading(true);
           setJoinError('');
           try {
-            const cfg = await loadHouseholdFromCloud(db, code);
-            if (!cfg) {
-              setJoinError('Código não encontrado. Confira se copiou certo e se a família já foi criada no outro aparelho.');
-              return;
-            }
-            saveAppConfig(cfg);
+            const cfg = await joinHousehold(db, uid, code);
+            saveAppConfig(uid, cfg);
             setHouseholdId(code);
             setPersonAName(nameA(cfg));
             setPersonBName(nameB(cfg));
@@ -767,7 +992,13 @@
             setStep('select');
           } catch (e) {
             console.error(e);
-            setJoinError('Erro ao buscar família. Tente novamente.');
+            if (e.message === 'NOT_FOUND') {
+              setJoinError('Código não encontrado. Confira se copiou certo e se a família já foi criada.');
+            } else if (e.message === 'FULL') {
+              setJoinError('Esta família já tem 2 membros. Peça ao criador para excluir e recriar, ou use outra conta.');
+            } else {
+              setJoinError('Erro ao entrar na família. Tente novamente.');
+            }
           } finally {
             setJoinLoading(false);
           }
@@ -785,7 +1016,8 @@
           return (
             <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
               <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
-              <p className="text-lg text-slate-600 dark:text-slate-400 mb-8 text-center">Configure seu acerto financeiro a dois</p>
+              <p className="text-lg text-slate-600 dark:text-slate-400 mb-2 text-center">Configure seu acerto financeiro a dois</p>
+              {userEmail && <p className="text-xs text-slate-500 mb-6">{userEmail}</p>}
               <div className="space-y-3 w-full max-w-xs">
                 <button onClick={() => { setMode('create'); setStep('names'); }}
                   className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold shadow-lg hover:brightness-110">
@@ -796,6 +1028,11 @@
                   Entrar com código da família
                 </button>
               </div>
+              {onSignOut && (
+                <button onClick={onSignOut} className="mt-8 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                  Sair da conta
+                </button>
+              )}
             </div>
           );
         }
@@ -873,10 +1110,9 @@
               </div>
               <button disabled={cards.length > 0 && !validCards} onClick={() => {
                 if (mode === 'create' && !householdId) setHouseholdId(generateId());
-                if (mode === 'join') finishConfig();
-                else setStep('household');
+                setStep('household');
               }} className="w-full py-3 rounded-xl bg-indigo-600 text-white font-semibold disabled:opacity-50">
-                {mode === 'join' ? 'Salvar e continuar' : 'Continuar'}
+                Continuar
               </button>
               <button onClick={() => setStep('names')} className="mt-2 text-sm text-slate-500">Voltar</button>
             </div>
@@ -905,7 +1141,7 @@
         }
 
         // step === 'select'
-        const cfg = existingConfig?.setupComplete ? existingConfig : loadAppConfig();
+        const cfg = existingConfig?.setupComplete ? existingConfig : loadAppConfig(uid);
         return (
           <div className="min-h-screen flex flex-col justify-center items-center p-6 bg-slate-50 dark:bg-slate-900">
             <h1 className="text-4xl font-bold mb-2 text-slate-800 dark:text-white">Meu Acerto</h1>
@@ -923,20 +1159,28 @@
             <button onClick={() => setStep('names')} className="mt-8 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
               Configurações
             </button>
+            {onSignOut && (
+              <button onClick={onSignOut} className="mt-3 text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                Sair da conta
+              </button>
+            )}
           </div>
         );
       };
 
-      const SettingsModal = ({ isOpen, onClose, config, onSave, db }) => {
+      const SettingsModal = ({ isOpen, onClose, config, onSave, db, uid, isOwner, onDeleteHousehold, onSignOut }) => {
         const [personAName, setPersonAName] = useState(nameA(config));
         const [personBName, setPersonBName] = useState(nameB(config));
         const [cards, setCards] = useState(config?.cards || []);
+        const [deleteConfirm, setDeleteConfirm] = useState('');
+        const [deleting, setDeleting] = useState(false);
 
         useEffect(() => {
           if (isOpen && config) {
             setPersonAName(nameA(config));
             setPersonBName(nameB(config));
             setCards(config.cards || []);
+            setDeleteConfirm('');
           }
         }, [isOpen, config]);
 
@@ -949,13 +1193,27 @@
         const handleSave = async () => {
           const updated = buildConfig(config.householdId, personAName, personBName, cards);
           try {
-            await saveHouseholdToCloud(db, updated);
-            saveAppConfig(updated);
+            await saveHouseholdToCloud(db, updated, uid);
+            saveAppConfig(uid, updated);
             onSave(updated);
             onClose();
           } catch (e) {
             console.error(e);
             alert('Erro ao salvar configurações na nuvem. Tente novamente.');
+          }
+        };
+
+        const handleDeleteHousehold = async () => {
+          if (deleteConfirm !== 'EXCLUIR') return;
+          setDeleting(true);
+          try {
+            await onDeleteHousehold();
+            onClose();
+          } catch (e) {
+            console.error(e);
+            alert('Erro ao excluir família. Tente novamente.');
+          } finally {
+            setDeleting(false);
           }
         };
 
@@ -989,6 +1247,27 @@
                 </div>
               ))}
               <button onClick={addCard} className="text-sm text-indigo-600">+ Adicionar cartão</button>
+
+              {isOwner && (
+                <div className="mt-4 pt-4 border-t border-slate-200 dark:border-slate-700">
+                  <p className="text-sm font-medium text-red-600 dark:text-red-400 mb-2">Zona de perigo</p>
+                  <p className="text-xs text-slate-500 mb-2">
+                    Excluir a família apaga todos os lançamentos e parcelas. O outro membro também perderá acesso.
+                  </p>
+                  <input className={ui.input} placeholder='Digite EXCLUIR para confirmar'
+                    value={deleteConfirm} onChange={(e) => setDeleteConfirm(e.target.value)} />
+                  <button disabled={deleteConfirm !== 'EXCLUIR' || deleting} onClick={handleDeleteHousehold}
+                    className="mt-2 w-full py-2 rounded-xl bg-red-600 text-white text-sm font-semibold disabled:opacity-50">
+                    {deleting ? 'Excluindo...' : 'Excluir família'}
+                  </button>
+                </div>
+              )}
+
+              {onSignOut && (
+                <button onClick={onSignOut} className="mt-2 w-full py-2 rounded-xl text-sm text-slate-500 hover:text-slate-700 dark:hover:text-slate-300">
+                  Sair da conta
+                </button>
+              )}
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button className={ui.btnGhost} onClick={onClose}>Cancelar</button>
@@ -999,7 +1278,7 @@
       };
 
       /* ========= Dashboard ========= */
-      const Dashboard = ({ activePanel, config, onLogout, onConfigChange, db, householdId }) => {
+      const Dashboard = ({ activePanel, config, onLogout, onConfigChange, db, householdId, uid, isOwner, onDeleteHousehold, onSignOut }) => {
         const [expenses, setExpenses] = useState([]);
         const [installmentPlans, setInstallmentPlans] = useState([]);
         const [monthsFromDb, setMonthsFromDb] = useState([]);
@@ -1948,6 +2227,10 @@
                 config={config}
                 onSave={onConfigChange}
                 db={db}
+                uid={uid}
+                isOwner={isOwner}
+                onDeleteHousehold={onDeleteHousehold}
+                onSignOut={onSignOut}
               />
           </div>
         );
@@ -1955,16 +2238,15 @@
 
       // ================== APP (Bootstrap Firebase + escolha de usuário) ==================
       const App = () => {
+        const [auth, setAuth] = useState(null);
         const [db, setDb] = useState(null);
         const [authReady, setAuthReady] = useState(false);
-        const [config, setConfig] = useState(() => loadAppConfig());
-        const [activePanel, setActivePanel] = useState(() => {
-          try {
-            return localStorage.getItem(PANEL_STORAGE_KEY) || null;
-          } catch {
-            return null;
-          }
-        });
+        const [profileLoading, setProfileLoading] = useState(false);
+        const [user, setUser] = useState(null);
+        const [userProfile, setUserProfile] = useState(null);
+        const [config, setConfig] = useState(null);
+        const [activePanel, setActivePanel] = useState(null);
+        const [isOwner, setIsOwner] = useState(false);
         const [firebaseError, setFirebaseError] = useState(null);
 
         useEffect(() => {
@@ -1982,47 +2264,112 @@
             window._meuAcertoApp = app;
 
             const dbInstance = fb.getFirestore(app);
+            window._meuAcertoDb = dbInstance;
             setDb(dbInstance);
 
             fb.enableIndexedDbPersistence(dbInstance).catch(() => {});
 
-            const auth = fb.getAuth(app);
-            fb.onAuthStateChanged(auth, (user) => {
-              if (user) {
+            const authInstance = fb.getAuth(app);
+            setAuth(authInstance);
+
+            fb.onAuthStateChanged(authInstance, async (u) => {
+              setUser(u);
+              if (!u) {
+                setUserProfile(null);
+                setConfig(null);
+                setActivePanel(null);
+                setIsOwner(false);
                 setAuthReady(true);
-              } else {
-                fb.signInAnonymously(auth).catch(console.error);
+                setProfileLoading(false);
+                return;
+              }
+
+              setProfileLoading(true);
+              try {
+                const profile = await ensureUserProfile(dbInstance, u);
+                setUserProfile(profile);
+
+                if (profile?.householdId) {
+                  const cloudCfg = await loadHouseholdFromCloud(dbInstance, profile.householdId);
+                  if (cloudCfg) {
+                    saveAppConfig(u.uid, cloudCfg);
+                    setConfig(cloudCfg);
+                    const owner = await isHouseholdOwner(dbInstance, profile.householdId, u.uid);
+                    setIsOwner(owner);
+                    setActivePanel(loadActivePanel(u.uid));
+                  } else {
+                    clearUserLocalData(u.uid);
+                    await linkUserToHousehold(dbInstance, u.uid, null);
+                    setUserProfile({ ...profile, householdId: null });
+                    setConfig(null);
+                    setActivePanel(null);
+                    setIsOwner(false);
+                  }
+                } else {
+                  clearUserLocalData(u.uid);
+                  setConfig(null);
+                  setActivePanel(null);
+                  setIsOwner(false);
+                }
+              } catch (e) {
+                console.error(e);
+              } finally {
+                setProfileLoading(false);
+                setAuthReady(true);
               }
             });
-
-            fb.signInAnonymously(auth).catch(() => {});
           } else {
             const app = window._meuAcertoApp;
             const dbInstance = window.FirebaseLib.getFirestore(app);
+            window._meuAcertoDb = dbInstance;
             setDb(dbInstance);
+            setAuth(window.FirebaseLib.getAuth(app));
             setAuthReady(true);
           }
         }, []);
 
-        const handleSetupComplete = (cfg, panel) => {
+        const handleSetupComplete = async (cfg, panel) => {
           setConfig(cfg);
-          saveAppConfig(cfg);
+          if (user?.uid) saveAppConfig(user.uid, cfg);
+          if (cfg?.householdId) {
+            setUserProfile((p) => p ? { ...p, householdId: cfg.householdId } : p);
+            if (db && user?.uid) {
+              const owner = await isHouseholdOwner(db, cfg.householdId, user.uid);
+              setIsOwner(owner);
+            }
+          }
           if (panel) {
             setActivePanel(panel);
-            try { localStorage.setItem(PANEL_STORAGE_KEY, panel); } catch {}
+            if (user?.uid) saveActivePanel(user.uid, panel);
           }
         };
 
         const handleLogout = () => {
           setActivePanel(null);
-          try { localStorage.removeItem(PANEL_STORAGE_KEY); } catch {}
+          if (user?.uid) saveActivePanel(user.uid, null);
         };
 
-        useEffect(() => {
-          if (db && config?.setupComplete && config?.householdId) {
-            saveHouseholdToCloud(db, config).catch(() => {});
-          }
-        }, [db, config?.householdId]);
+        const handleSignOut = async () => {
+          if (!auth || !user?.uid) return;
+          const fb = window.FirebaseLib;
+          clearUserLocalData(user.uid);
+          setConfig(null);
+          setActivePanel(null);
+          setUserProfile(null);
+          setIsOwner(false);
+          await fb.signOut(auth);
+        };
+
+        const handleDeleteHousehold = async () => {
+          if (!db || !config?.householdId || !isOwner || !user?.uid) return;
+          await deleteHouseholdCascade(db, config.householdId);
+          await linkUserToHousehold(db, user.uid, null);
+          clearUserLocalData(user.uid);
+          setConfig(null);
+          setActivePanel(null);
+          setIsOwner(false);
+          setUserProfile((p) => p ? { ...p, householdId: null } : p);
+        };
 
         if (firebaseError) {
           return (
@@ -2043,13 +2390,43 @@
           );
         }
 
-        if (!config?.setupComplete || !activePanel) {
+        if (!user) {
+          return <LoginScreen auth={auth} />;
+        }
+
+        if (profileLoading) {
+          return (
+            <div className="min-h-screen flex flex-col items-center justify-center bg-slate-50 dark:bg-slate-900">
+              <div className="w-10 h-10 border-4 border-slate-300 border-t-indigo-500 rounded-full animate-spin mb-4" />
+              <p className="text-sm text-slate-600 dark:text-slate-300">Carregando perfil...</p>
+            </div>
+          );
+        }
+
+        if (!userProfile?.householdId || !config?.setupComplete) {
           return (
             <SetupWizard
               existingConfig={config}
-              initialStep={config?.setupComplete ? 'select' : undefined}
+              initialStep={undefined}
               onComplete={handleSetupComplete}
               db={db}
+              uid={user.uid}
+              userEmail={user.email}
+              onSignOut={handleSignOut}
+            />
+          );
+        }
+
+        if (!activePanel) {
+          return (
+            <SetupWizard
+              existingConfig={config}
+              initialStep="select"
+              onComplete={handleSetupComplete}
+              db={db}
+              uid={user.uid}
+              userEmail={user.email}
+              onSignOut={handleSignOut}
             />
           );
         }
@@ -2061,10 +2438,15 @@
             onLogout={handleLogout}
             onConfigChange={async (updated) => {
               setConfig(updated);
-              try { await saveHouseholdToCloud(db, updated); } catch (e) { console.error(e); }
+              if (user?.uid) saveAppConfig(user.uid, updated);
+              try { await saveHouseholdToCloud(db, updated, user.uid); } catch (e) { console.error(e); }
             }}
             db={db}
             householdId={config.householdId}
+            uid={user.uid}
+            isOwner={isOwner}
+            onDeleteHousehold={handleDeleteHousehold}
+            onSignOut={handleSignOut}
           />
         );
       };

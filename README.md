@@ -4,9 +4,10 @@ Meu Acerto é uma aplicação web para gerenciamento de despesas compartilhadas 
 
 ## Funcionalidades
 
+- **Conta individual**: login com Google ou e-mail/senha (mín. 8 caracteres)
 - **Configuração personalizada**: defina os nomes das duas pessoas e cadastre quantos cartões quiser
 - **Sincronização em tempo real**: lançamentos aparecem instantaneamente para ambos via Firebase Firestore
-- **Isolamento por família**: cada casal usa um código único (`householdId`) — seus dados não se misturam com outros usuários
+- **Isolamento por família**: cada casal usa um código único (`householdId`) — dados protegidos por membership
 - **Importação de faturas**: arquivos `.csv` ou `.xlsx` do banco
 - **Controle de parcelas**: gera parcelas futuras automaticamente
 - **Histórico mensal**: navegue entre meses anteriores
@@ -14,13 +15,16 @@ Meu Acerto é uma aplicação web para gerenciamento de despesas compartilhadas 
 
 ## Primeiro uso
 
-1. Abra o app e escolha **Criar nova família**
-2. Informe os nomes das duas pessoas
-3. Cadastre os cartões (nome, 4 últimos dígitos, dono)
-4. **Copie o código da família** e compartilhe com a outra pessoa
-5. Escolha quem está usando o app agora
+1. **Crie uma conta** (Google ou e-mail/senha)
+2. Escolha **Criar nova família**
+3. Informe os nomes das duas pessoas
+4. Cadastre os cartões (nome, 4 últimos dígitos, dono)
+5. **Copie o código da família** e compartilhe com a outra pessoa
+6. Escolha quem está usando o app agora
 
-No segundo dispositivo: **Entrar com código da família** → colar o código → configurar nomes/cartões → escolher painel.
+No segundo dispositivo: a outra pessoa **cria conta**, escolhe **Entrar com código da família** → cola o código → escolhe painel.
+
+Cada conta pode pertencer a **uma família por vez**. O criador pode **excluir a família** (apaga todos os dados) e criar outra.
 
 ## Regras de negócio (fixas)
 
@@ -38,9 +42,15 @@ O deploy é automático via GitHub Actions ao enviar alterações para `main`.
 ### Configurar Firebase (obrigatório)
 
 1. Crie um **novo** projeto no [Firebase Console](https://console.firebase.google.com/) (não use o app pessoal)
-2. Ative **Authentication → Login anônimo**
-3. Ative **Firestore** e publique as regras de [`firestore.rules`](firestore.rules)
-4. Cadastre estes **GitHub Secrets** no repositório `ACERTO-DE-CONTAS`:
+2. **Authentication → Provedores**
+   - Ative **E-mail/Senha**
+   - Ative **Google** (informe e-mail de suporte)
+   - **Desative Login anônimo**
+3. **Authentication → Settings → Authorized domains**
+   - Confirme `localhost`
+   - Adicione `iphonegalaxy.github.io`
+4. Ative **Firestore** e publique as regras de [`firestore.rules`](firestore.rules)
+5. Cadastre estes **GitHub Secrets** no repositório `ACERTO-DE-CONTAS`:
 
 | Secret | Valor |
 |--------|-------|
@@ -50,6 +60,13 @@ O deploy é automático via GitHub Actions ao enviar alterações para `main`.
 | `FIREBASE_STORAGE_BUCKET` | storageBucket |
 | `FIREBASE_MESSAGING_SENDER_ID` | messagingSenderId |
 | `FIREBASE_APP_ID` | appId |
+
+Opcional para smoke test automatizado:
+
+| Secret | Valor |
+|--------|-------|
+| `SMOKE_TEST_EMAIL` | E-mail da conta de teste |
+| `SMOKE_TEST_PASSWORD` | Senha da conta de teste (mín. 8 caracteres) |
 
 ### Desenvolvimento local
 

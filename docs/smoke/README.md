@@ -1,24 +1,15 @@
-# Smoke test — Meu Acerto genérico
+# Smoke test — Meu Acerto
 
-## Post-deploy (2026-05-30) — https://iphonegalaxy.github.io/ACERTO-DE-CONTAS/
+## Pré-requisitos
 
-| # | Teste | Resultado |
-|---|-------|-----------|
-| 01 | App carrega sem erro de Firebase | PASS |
-| 02 | Tela "Criar nova família" / "Entrar com código" | PASS |
-| 03 | Etapa de nomes customizáveis | PASS |
-| 04 | Etapa de cartões (adicionar/remover) | PASS |
-| 05 | Código da família (UUID) exibido | PASS |
-| 06 | Seleção de painel com nomes salvos | PASS |
-| 07 | Dashboard Pessoa 1 carrega | PASS |
-| 08 | Nomes customizados nos cards | PASS |
-| 09 | Ajuste oculto no painel A | PASS |
-| 10 | Cartão customizado no modal "+ Novo" | Verificar manualmente* |
-| 11 | Ajuste visível no painel B | PASS |
+O app exige **login** (Google ou e-mail/senha). Para o smoke automatizado, configure:
 
-\* O teste automatizado falhou no seletor do `<option>` (limitação do Playwright), mas o fluxo de cartões na etapa de setup passou.
+```bash
+export SMOKE_TEST_EMAIL="conta-de-teste@exemplo.com"
+export SMOKE_TEST_PASSWORD="senha1234"
+```
 
-Screenshots em `post-deploy/`.
+A conta deve existir no Firebase e **não** ter família vinculada (ou o teste para na tela de boas-vindas).
 
 ## Como repetir o smoke automatizado
 
@@ -28,13 +19,19 @@ npx playwright install chromium
 node docs/smoke/run-smoke.mjs
 ```
 
+Opcional: `SMOKE_BASE_URL=http://localhost:3456/` para testar localmente.
+
 ## Smoke manual complementar (recomendado)
 
-- [ ] **Sync**: abrir em 2 abas/navegadores com o mesmo código da família → lançamento aparece em tempo real
+- [ ] **Login Google** e **login e-mail/senha** no GitHub Pages
+- [ ] **Sync**: conta A cria família → conta B entra com código → lançamento aparece em tempo real
 - [ ] **Isolamento**: família A não vê dados da família B
+- [ ] **Exclusão**: criador exclui família → ambos voltam ao wizard
+- [ ] **Membro**: quem entrou com código não vê opção de excluir família
 - [ ] **Lançamento**: criar despesa Cartão, Pix, Boleto
 - [ ] **Ajuste**: só no painel Pessoa 2
 - [ ] **Importação**: CSV/XLSX de fatura
 - [ ] **Parcelas**: lançamento 1/10 gera parcelas futuras
-- [ ] **Limpar mês**: apaga só do painel ativo
 - [ ] **Configurações**: editar nomes/cartões sem perder householdId
+
+Screenshots em `post-deploy/`.
