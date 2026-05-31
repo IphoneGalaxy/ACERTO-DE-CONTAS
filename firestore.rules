@@ -51,10 +51,7 @@ service cloud.firestore {
     }
 
     match /users/{userId} {
-      allow read: if isRegistered() && (
-        request.auth.uid == userId
-        || resource.data.isGuest == true
-      );
+      allow get: if isRegistered();
       allow write: if isRegistered() && request.auth.uid == userId;
     }
 

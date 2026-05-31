@@ -928,6 +928,7 @@
           const fb = window.FirebaseLib;
           try {
             if (hasFamilyCode) stashPendingJoinCode(familyCode);
+            else sessionStorage.removeItem('meuAcertoPendingJoinCode');
             if (mode === 'register') {
               const cred = await fb.createUserWithEmailAndPassword(auth, email.trim(), password);
               await ensureUserProfile(window._meuAcertoDb, cred.user);
@@ -948,6 +949,7 @@
           const fb = window.FirebaseLib;
           try {
             if (hasFamilyCode) stashPendingJoinCode(familyCode);
+            else sessionStorage.removeItem('meuAcertoPendingJoinCode');
             const provider = new fb.GoogleAuthProvider();
             const cred = await fb.signInWithPopup(auth, provider);
             await ensureUserProfile(window._meuAcertoDb, cred.user);
@@ -2446,9 +2448,11 @@
                     } catch (joinErr) {
                       console.error(joinErr);
                       await window.FirebaseLib.signOut(authInstance).catch(() => {});
+                      const permDenied = joinErr.code === 'permission-denied';
                       sessionStorage.setItem('meuAcertoJoinError',
                         joinErr.message === 'NOT_FOUND' ? 'Código não encontrado. Confira se copiou certo.'
                         : joinErr.message === 'FULL' ? 'Esta família já tem 2 membros com conta.'
+                        : permDenied ? 'Sem permissão para vincular. Publique as regras Firestore atualizadas.'
                         : 'Erro ao vincular à família. Tente novamente.');
                       return;
                     }
