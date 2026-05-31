@@ -234,13 +234,16 @@
               id: generateId(),
               label: (d.label || `Cartão final ${d.last4}`).trim(),
               last4: d.last4,
-              owner: 'personA',
+              owner: d.owner || inferOwnerFromLast4(d.last4, bankId),
               bankId,
             });
           } else {
             const cur = { ...list[idx] };
             if (!cur.label?.trim() && d.label) cur.label = d.label.trim();
             if (!cur.bankId) cur.bankId = bankId;
+            const inferred = d.owner || inferOwnerFromLast4(d.last4, bankId);
+            if (d.last4 === '1009') cur.owner = 'personB';
+            else if (!cur.owner) cur.owner = inferred;
             list[idx] = cur;
           }
         }
@@ -426,10 +429,28 @@
         return null;
       };
 
+      const inferOwnerFromLast4 = (last4, bankId = '') => {
+        if (bankId === 'c6' || !bankId) {
+          if (last4 === '1009') return 'personB';
+          if (last4 === '7292') return 'both';
+          if (last4 === '2581') return 'personA';
+        }
+        return 'personA';
+      };
+
       const panelUserFromCard = (card) => {
         if (!card) return 'personA';
         if (card.owner === 'personB') return 'personB';
         return 'personA';
+      };
+
+      const panelUserFromCardAndLast4 = (card, last4, bankId = 'c6') => {
+        const bid = card?.bankId || bankId;
+        if (bid === 'c6' && last4) {
+          if (last4 === '1009') return 'personB';
+          if (last4 === '2581' || last4 === '7292') return 'personA';
+        }
+        return panelUserFromCard(card);
       };
 
       const defaultCardForPanel = (panel, cfg) => {
@@ -831,15 +852,17 @@
           if (!last4) continue;
 
           const label = titularFromRowC6(row, cols, last4);
-          if (!discoveredMap.has(last4)) discoveredMap.set(last4, { last4, label });
+          const inferredOwner = inferOwnerFromLast4(last4, 'c6');
+          if (!discoveredMap.has(last4)) {
+            discoveredMap.set(last4, { last4, label, owner: inferredOwner });
+          }
 
           let source = 'Cartão';
           const matchedCard = findCardByLast4(last4, config.cards);
           if (matchedCard) source = cardDisplaySource(matchedCard);
           else source = `Cartão (final ${last4})`;
 
-          let panelUserVal = 'personA';
-          if (matchedCard) panelUserVal = panelUserFromCard(matchedCard);
+          const panelUserVal = panelUserFromCardAndLast4(matchedCard, last4, 'c6');
 
           expenses.push({
             householdId,
