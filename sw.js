@@ -6,13 +6,17 @@ function repoBasePath() {
 }
 
 const BASE = repoBasePath();
-const CACHE = `meu-acerto-v6${BASE.replace(/\//g, '-')}`;
+const CACHE = `meu-acerto-v7${BASE.replace(/\//g, '-')}`;
 
 const APP_SHELL = [
   `${BASE}/`,
   `${BASE}/index.html`,
   `${BASE}/manifest.json`,
-  `${BASE}/sw.js`
+  `${BASE}/sw.js`,
+  `${BASE}/assets/icon-192.png`,
+  `${BASE}/assets/icon-512.png`,
+  `${BASE}/assets/apple-touch-icon.png`,
+  `${BASE}/assets/favicon-32.png`
 ];
 
 const CDN_ASSETS = [
