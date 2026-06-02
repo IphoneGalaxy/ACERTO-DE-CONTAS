@@ -19,7 +19,16 @@ const log = (id, ok, note) => {
   console.log(`${ok ? 'PASS' : 'FAIL'}  ${id} — ${note}`);
 };
 
+const dismissSplashIfNeeded = async (page) => {
+  const splashCta = page.getByRole('button', { name: 'Já tenho uma conta' });
+  if (await splashCta.isVisible().catch(() => false)) {
+    await splashCta.click();
+    await page.waitForTimeout(400);
+  }
+};
+
 const loginIfNeeded = async (page) => {
+  await dismissSplashIfNeeded(page);
   const loginTab = page.getByRole('button', { name: 'Entrar', exact: true }).first();
   const hasLogin = await loginTab.isVisible().catch(() => false);
   if (!hasLogin) return true;
