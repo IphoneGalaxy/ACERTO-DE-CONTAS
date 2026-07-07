@@ -1168,6 +1168,178 @@
         return { expenses, discovered: [], bankId: 'nubank' };
       };
 
+      // --- PARSER ITAÚ PDF ---
+
+      const normalizeItauTextForSearch = (text) => {
+        return String(text || '')
+          .normalize('NFD')
+          .replace(/[\u0300-\u036f]/g, '')
+          .replace(/\s+/g, '')
+          .toLowerCase()
+          .trim();
+      };
+
+      const parseBrazilianCurrency = (raw) => {
+        if (raw == null) return NaN;
+        let s = String(raw).trim();
+        s = s.replace(/R\$\s*/i, '');
+        s = s.replace(/\s/g, '');
+        s = s.replace(/\./g, '');
+        s = s.replace(/,/g, '.');
+        const n = parseFloat(s);
+        return Number.isFinite(n) ? n : NaN;
+      };
+
+      const parseItauDate = (ddmm, currentMonth) => {
+        const parts = String(ddmm).split('/');
+        if (parts.length !== 2) return null;
+        const day = parseInt(parts[0], 10);
+        const month = parseInt(parts[1], 10);
+        if (isNaN(day) || isNaN(month) || day < 1 || day > 31 || month < 1 || month > 12) return null;
+        const year = parseInt((currentMonth || '2026-07').substring(0, 4), 10) || new Date().getFullYear();
+        const dateMk = `${year}-${String(month).padStart(2, '0')}`;
+        return { date: `${String(day).padStart(2, '0')}/${String(month).padStart(2, '0')}/${year}`, originalMonthKey: dateMk };
+      };
+
+      const extractItauCardLast4 = (text) => {
+        // Normaliza quebras de linha para espaço
+        const flat = text.replace(/\n/g, ' ');
+        // Padrão principal: Cartão/Cartao com espaços entre letras + 4 dígitos + X/* + 4 dígitos
+        let m = flat.match(/cart\s*[ãa]\s*o[\s.]*(\d{4})[\s.]*[x\*]{3,}[\s.]*[x\*]{3,}[\s.]*(\d{4})/i);
+        if (m) return m[2];
+        // Fallback 1: "final NNNN"
+        m = flat.match(/\bfinal\s+(\d{4})\b/i);
+        if (m) return m[1];
+        // Fallback 2: "Cartão" próximo a 4 dígitos (janela de 60 chars)
+        m = flat.match(/cart\s*[ãa]\s*o[\s\S]{0,60}?(\d{4})\s*(\d{4})\s*(\d{4})\s*(\d{4})/i);
+        if (m) return m[4];
+        return null;
+      };
+
+      const extractItauCurrentSectionLines = (text) => {
+        const lines = text.split('\n');
+        const normLines = lines.map(normalizeItauTextForSearch);
+
+        // Find "lançamentos compras e saques" marker
+        let lancIdx = -1;
+        for (let i = 0; i < normLines.length; i++) {
+          if (normLines[i].includes('lancamentos') && normLines[i].includes('compras') && normLines[i].includes('saques')) {
+            lancIdx = i;
+            break;
+          }
+        }
+        if (lancIdx < 0) return [];
+
+        // Find the LAST "DATA ESTABELECIMENTO VALOR" sub-header that comes AFTER lançamentos
+        // (or the closest one after it)
+        let dataIdx = -1;
+        for (let i = lancIdx + 1; i < normLines.length; i++) {
+          if (normLines[i].includes('data') && normLines[i].includes('estabelecimento') && normLines[i].includes('valor')) {
+            dataIdx = i;
+            break;
+          }
+        }
+        if (dataIdx < 0) return [];
+
+        // Collect transaction lines after the DATA sub-header
+        const sectionLines = [];
+        for (let i = dataIdx + 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          const nl = normLines[i];
+
+          // STOP only on next section header
+          if (nl.includes('data') && nl.includes('estabelecimento') && nl.includes('valor')) break;
+          if (nl.includes('comprasparceladas')) break;
+          if (nl.includes('pagamentosefetuados')) break;
+
+          // SKIP non-transaction lines (continue to next line)
+          if (nl.startsWith('demaisfaturas')) continue;
+          if (nl.includes('proximasfaturas')) continue;  // "Total para próximas faturas", not section header
+          if (nl.includes('proximafatura')) continue;
+          if (nl === 'totaldospagamentos') continue;
+          if (nl.includes('limites') && nl.includes('credito')) continue;
+          if (nl.includes('limitetotal')) continue;
+          if (nl.includes('limitedisponivel')) continue;
+          if (nl.includes('limitetotalutilizado')) continue;
+          if (nl === 'outros' || /^outros/.test(nl)) continue;
+          if (/^(saude|servicos|alimentacao|transporte|lazer|educacao|moradia|vestuario)/i.test(nl)) continue;
+          if (/essess[aã]osseuslimites/i.test(nl)) continue;
+          if (/casoqueiraconsultar/i.test(nl)) continue;
+          if (/limiteconsulte/i.test(nl)) continue;
+
+          sectionLines.push(line);
+        }
+        return sectionLines;
+      };
+
+      const parseItauTransactionLine = (line) => {
+        // Extract DD/MM + description + BRL value, with optional trailing text
+        const m = line.match(/^(\d{2}\/\d{2})\s+(.+?)\s+(-?[\d\.]+,\d{2})(?:\s|$)/);
+        if (!m) return null;
+
+        const rawDate = m[1];
+        const rawDesc = m[2].trim();
+        const rawValue = m[3];
+
+        const descLower = normalizeItauTextForSearch(rawDesc);
+        if (descLower === 'pagamento') return null;
+
+        const amount = parseBrazilianCurrency(rawValue);
+        if (Number.isNaN(amount)) return null;
+
+        return { rawDate, description: rawDesc, amount };
+      };
+
+      const parseItauInstallment = (description) => {
+        const m = description.match(/\b(\d{1,2})\/(\d{1,3})\b/);
+        if (!m) return { isInstallment: false };
+        const current = parseInt(m[1], 10);
+        const total = parseInt(m[2], 10);
+        if (total < 2 || current > total) return { isInstallment: false };
+        return { isInstallment: true, parcela: `${current}/${total}`, current, total };
+      };
+
+      const parseItauPdf = (text, config, householdId, currentMonth) => {
+        const sectionLines = extractItauCurrentSectionLines(text);
+        const last4 = extractItauCardLast4(text);
+        const expenses = [];
+
+        for (const line of sectionLines) {
+          const tx = parseItauTransactionLine(line);
+          if (!tx) continue;
+
+          const dateInfo = parseItauDate(tx.rawDate, currentMonth);
+          if (!dateInfo) continue;
+
+          const inst = parseItauInstallment(tx.description);
+          const isNegative = tx.amount < 0;
+
+          expenses.push({
+            householdId,
+            description: tx.description,
+            amount: tx.amount,
+            date: dateInfo.date,
+            type: 'Cartão',
+            paymentSource: last4 ? `Itaú (final ${last4})` : 'Itaú',
+            bankId: 'itau',
+            split: 'Dividido',
+            paidBy: 'Cartão',
+            monthKey: currentMonth,
+            originalMonthKey: dateInfo.originalMonthKey,
+            parcela: inst.isInstallment ? inst.parcela : null,
+            isInstallment: inst.isInstallment,
+            installmentTotal: inst.isInstallment ? inst.total : null,
+            installmentCurrent: inst.isInstallment ? inst.current : null,
+            installmentPlanId: inst.isInstallment ? `${norm(tx.description)}||${inst.total}` : null,
+            panelUser: 'personA',
+            needsReview: isNegative,
+          });
+        }
+
+        return { expenses, discovered: [], bankId: 'itau' };
+      };
+
       const createImportStub = (bankId) => {
         const bank = getBankById(bankId);
         return () => { throw new Error(`IMPORT_NOT_READY:${bank?.name || bankId}`); };
@@ -1182,7 +1354,7 @@
         itau: {
           readMode: 'pdfText',
           acceptedExtensions: ['.pdf'],
-          parse: createImportStub('itau'),
+          parse: parseItauPdf,
         },
         bb: {
           readMode: 'spreadsheet',
