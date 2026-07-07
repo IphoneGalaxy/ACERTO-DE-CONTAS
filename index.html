@@ -2793,10 +2793,10 @@
               const q = query(
                   expRef,
                   where('householdId', '==', householdId),
-                  where('monthKey','==', currentMonth),
-                  where('panelUser', '==', activePanel)
+                  where('monthKey','==', currentMonth)
               );
               const snap = await window.FirebaseLib.getDocs(q);
+              if (snap.empty) { setIsClearOpen(false); return; }
               const batch = writeBatch(db);
               snap.forEach(d => batch.delete(d.ref));
               await batch.commit();
