@@ -2386,7 +2386,7 @@
         }, [expensesForScope, activePanel]);
 
         useEffect(() => {
-          if (filterType !== 'Cartão') setCardBankFilter('todos');
+          if (filterType !== 'Cartão' && filterType !== 'Parcelado') setCardBankFilter('todos');
         }, [filterType]);
 
         const bankFiltersAvailable = useMemo(
@@ -2403,7 +2403,7 @@
                   base = base.filter(e => e.type === filterType);
               }
           }
-          if (filterType === 'Cartão' && cardBankFilter !== 'todos') {
+          if ((filterType === 'Cartão' || filterType === 'Parcelado') && cardBankFilter !== 'todos') {
             base = base.filter((e) => getExpenseBankId(e, config.cards) === cardBankFilter);
           }
           return base.sort((a,b) => {
@@ -3029,7 +3029,7 @@
                             ))}
                       </div>
 
-                      {filterType === 'Cartão' && bankFiltersAvailable.length > 0 && (
+                      {(filterType === 'Cartão' || filterType === 'Parcelado') && bankFiltersAvailable.length > 0 && (
                         <div className="flex gap-2 p-1 mb-2 overflow-x-auto">
                           <button
                             type="button"
