@@ -671,10 +671,55 @@
         return best;
       }
 
+      // --- PDF READER (lazy-load PDF.js UMD, agrupamento por Y) ---
+      let _pdfjsReady = false;
+      function loadPdfJs() {
+        return new Promise((resolve, reject) => {
+          if (_pdfjsReady) return resolve();
+          if (window.pdfjsLib) { _pdfjsReady = true; return resolve(); }
+          const script = document.createElement('script');
+          script.src = 'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js';
+          script.onload = () => {
+            window.pdfjsLib.GlobalWorkerOptions.workerSrc =
+              'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
+            _pdfjsReady = true;
+            resolve();
+          };
+          script.onerror = () => reject(new Error('Não foi possível carregar o leitor de PDF. Verifique sua conexão.'));
+          document.head.appendChild(script);
+        });
+      }
+
+      async function readPdfFile(file) {
+        await loadPdfJs();
+        const pdfjsLib = window.pdfjsLib;
+        const data = await file.arrayBuffer();
+        const pdf = await pdfjsLib.getDocument({ data }).promise;
+        const allLines = [];
+        for (let i = 1; i <= pdf.numPages; i++) {
+          const page = await pdf.getPage(i);
+          const content = await page.getTextContent();
+          const lineMap = {};
+          for (const item of content.items) {
+            const y = Math.round(item.transform[5]);
+            if (!lineMap[y]) lineMap[y] = [];
+            lineMap[y].push({ x: item.transform[4], str: item.str });
+          }
+          const sortedYs = Object.keys(lineMap).map(Number).sort((a, b) => b - a);
+          allLines.push(`--- PAGINA ${i} ---`);
+          for (const y of sortedYs) {
+            lineMap[y].sort((a, b) => a.x - b.x);
+            allLines.push(lineMap[y].map(it => it.str).join(' ').trim());
+          }
+          allLines.push('');
+        }
+        return allLines.join('\n');
+      }
+
       // --- FILE READERS (leitura bruta por formato) ---
       const fileReaders = {
         spreadsheet: readSpreadsheetFile,
-        // pdfText será adicionado na Fase C (Itaú PDF)
+        pdfText: readPdfFile,
       };
 
       // --- PARSER DE PARCELA (ATUALIZADO V2) ---
