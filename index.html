@@ -328,6 +328,12 @@
       const getBankById = (bankId) => BANKS.find((b) => b.id === bankId) || null;
       const getBankName = (bankId) => getBankById(bankId)?.name || bankId || '';
 
+      const BANK_RULES = {
+        c6: { dataFormat: 'PT' },
+        nubank: { dataFormat: 'ISO' },
+        itau: { dataFormat: 'PT' },
+      };
+
       const mergeDiscoveredCards = (existingCards, discovered, bankId) => {
         const list = [...(existingCards || [])];
         for (const d of discovered) {
@@ -665,6 +671,12 @@
         return best;
       }
 
+      // --- FILE READERS (leitura bruta por formato) ---
+      const fileReaders = {
+        spreadsheet: readSpreadsheetFile,
+        // pdfText será adicionado na Fase C (Itaú PDF)
+      };
+
       // --- PARSER DE PARCELA (ATUALIZADO V2) ---
       function parseInstallmentFromCell(cellValue) {
         if (cellValue == null || cellValue === '') {
@@ -998,22 +1010,62 @@
         };
       };
 
-      const createImportStub = (bankId) => () => {
+      const createImportStub = (bankId) => {
         const bank = getBankById(bankId);
-        throw new Error(`IMPORT_NOT_READY:${bank?.name || bankId}`);
+        return () => { throw new Error(`IMPORT_NOT_READY:${bank?.name || bankId}`); };
       };
 
       const importParsers = {
-        c6: (rows, config, householdId, currentMonth) => parseC6Spreadsheet(rows, config, householdId, currentMonth),
-        itau: createImportStub('itau'),
-        bb: createImportStub('bb'),
-        bradesco: createImportStub('bradesco'),
-        santander: createImportStub('santander'),
-        caixa: createImportStub('caixa'),
-        nubank: createImportStub('nubank'),
-        inter: createImportStub('inter'),
-        mercadopago: createImportStub('mercadopago'),
-        picpay: createImportStub('picpay'),
+        c6: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx', '.xls'],
+          parse: (data, config, householdId, currentMonth) => parseC6Spreadsheet(data, config, householdId, currentMonth),
+        },
+        itau: {
+          readMode: 'pdfText',
+          acceptedExtensions: ['.pdf'],
+          parse: createImportStub('itau'),
+        },
+        bb: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('bb'),
+        },
+        bradesco: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('bradesco'),
+        },
+        santander: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('santander'),
+        },
+        caixa: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('caixa'),
+        },
+        nubank: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv'],
+          parse: createImportStub('nubank'),
+        },
+        inter: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('inter'),
+        },
+        mercadopago: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('mercadopago'),
+        },
+        picpay: {
+          readMode: 'spreadsheet',
+          acceptedExtensions: ['.csv', '.xlsx'],
+          parse: createImportStub('picpay'),
+        },
       };
 
       const parseMoney = (input) => {
@@ -2260,8 +2312,15 @@
             setIsAddOpen(true);
         };
 
+        const stablePaymentSourceKey = (paymentSource) => {
+          const s = String(paymentSource || '');
+          const m = s.match(/final\s*(\d{4})/i);
+          if (m) return `final:${m[1]}`;
+          return norm(s);
+        };
+
         const makeDedupeKey = (e) => 
-          `${norm(e.description)}|${e.amount}|${e.date}|${e.parcela||''}|${norm(e.type)}|${norm(e.paymentSource)}|${e.monthKey}`;
+          `${norm(e.description)}|${e.amount}|${e.date}|${e.parcela||''}|${norm(e.type)}|${stablePaymentSourceKey(e.paymentSource)}|${e.monthKey}|${e.bankId||''}`;
 
         const openImportFlow = () => {
           setImportError('');
@@ -2274,6 +2333,10 @@
           pendingImportBankRef.current = bankId;
           setImportError('');
           setIsBankSelectOpen(false);
+          const parserConfig = importParsers[bankId];
+          if (fileInputRef.current && parserConfig?.acceptedExtensions) {
+            fileInputRef.current.accept = parserConfig.acceptedExtensions.join(',');
+          }
           fileInputRef.current?.click();
         };
 
@@ -2290,13 +2353,16 @@
           setIsImporting(true);
           setImportError('');
           try {
-              const rows = await readSpreadsheetFile(file);
-              if (!rows.length) throw new Error('Vazio');
+              const parserConfig = importParsers[bankId];
+              if (!parserConfig || !parserConfig.parse) throw new Error('IMPORT_NOT_READY:Banco');
 
-              const parser = importParsers[bankId];
-              if (!parser) throw new Error('IMPORT_NOT_READY:Banco');
+              const reader = fileReaders[parserConfig.readMode];
+              if (!reader) throw new Error('UNSUPPORTED_FORMAT');
 
-              const result = parser(rows, config, householdId, currentMonth);
+              const data = await reader(file);
+              if (parserConfig.readMode === 'spreadsheet' && !data.length) throw new Error('Vazio');
+
+              const result = parserConfig.parse(data, config, householdId, currentMonth);
               setImportedExpenses(result.expenses || []);
               setImportDiscoveredCards(result.discovered || []);
               setImportBankId(result.bankId || bankId);
@@ -2320,7 +2386,8 @@
           setIsImporting(true);
 
           try {
-            const bankId = importBankId || 'c6';
+            const bankId = importBankId;
+            if (!bankId) throw new Error('bankId ausente na importação');
             if (importDiscoveredCards.length > 0) {
               const mergedCards = mergeDiscoveredCards(config.cards, importDiscoveredCards, bankId);
               const updatedConfig = buildConfig(config.householdId, nameA(config), nameB(config), mergedCards);

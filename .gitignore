@@ -82,3 +82,25 @@ coverage/
 
 # Firebase config gerado no deploy (secrets do GitHub)
 firebase-config.js
+
+# =========================
+# Modelos de extrato bancário (locais, não versionar)
+# =========================
+docs/modelos_extratos_bancarios/
+
+# =========================
+# Fixtures de teste (apenas sintéticos versionados)
+# =========================
+test/fixtures/*.csv
+test/fixtures/*.xlsx
+test/fixtures/*.xls
+test/fixtures/*.pdf
+test/fixtures/*.ofx
+!test/fixtures/README.md
+!test/fixtures/*.sintetico.csv
+
+# =========================
+# Documentos de planejamento (local apenas)
+# =========================
+docs/plans/
+docs/relatorios/
