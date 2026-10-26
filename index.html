@@ -2744,6 +2744,15 @@
           if (fileInputRef.current) fileInputRef.current.value = '';
         };
 
+        const hasExistingImportInvoice = useMemo(() => {
+          const month = importedExpenses[0]?.monthKey;
+          return !!month && !!importBankId && expenses.some(e =>
+            e.monthKey === month && e.type === 'Cartão' &&
+            getExpenseBankId(e, config.cards) === importBankId);
+        }, [expenses, importedExpenses, importBankId, config.cards]);
+        useEffect(() => {
+          if (!hasExistingImportInvoice) setImportMode('add');
+        }, [hasExistingImportInvoice]);
         // Uma única gravação atômica: nunca apaga a fatura antes de salvar a nova.
         const commitExpenseChanges = async (removedDocs, addedExpenses = []) => {
           const planUpdates = [];
@@ -3283,7 +3292,7 @@
                     Banco: <strong>{getBankName(importBankId)}</strong> · {importedExpenses.length} lançamento(s)
                   </p>
                   <p className="text-sm mb-3 text-slate-500">Mês: {monthLabel(importedExpenses[0]?.monthKey || currentMonth)} · Total: {formatBRL(importedExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0))}</p>
-                  <fieldset disabled={isImporting} className="space-y-2 mb-4 text-sm text-slate-700 dark:text-slate-200">
+                  {hasExistingImportInvoice && <fieldset disabled={isImporting} className="space-y-2 mb-4 text-sm text-slate-700 dark:text-slate-200">
                     <legend className="font-semibold mb-2">Como deseja importar?</legend>
                     <label className="flex gap-2 items-start p-2 border rounded-lg dark:border-slate-700">
                       <input type="radio" name="importMode" value="add" checked={importMode === 'add'} onChange={() => setImportMode('add')} />
@@ -3293,7 +3302,7 @@
                       <input type="radio" name="importMode" value="replace" checked={importMode === 'replace'} onChange={() => setImportMode('replace')} />
                       <span>Substituir a fatura deste banco <small className="block text-slate-500">Apaga os lançamentos de cartão de {getBankName(importBankId)} neste mês, incluindo lançamentos manuais, e salva os deste arquivo. Abrange todos os cartões do banco e ambos os painéis. Outros bancos, Pix e boletos são preservados.</small></span>
                     </label>
-                  </fieldset>
+                  </fieldset>}
                   {importError && <p role="alert" className="text-sm text-red-500 mb-3">{importError}</p>}
                   {importDiscoveredCards.length > 0 && (
                     <div className="mb-3 p-2 rounded-lg bg-teal-50 dark:bg-teal-900/30 border border-teal-100 dark:border-teal-800">
@@ -3312,7 +3321,7 @@
                       )}
                   </div>
                   <button onClick={confirmImport} disabled={isImporting} className={ui.btnPrimary + " w-full disabled:opacity-50"}>
-                    {isImporting ? 'Importando...' : `${importMode === 'replace' ? 'Substituir fatura e importar' : 'Adicionar'} ${importedExpenses.length} itens`}
+                    {isImporting ? 'Importando...' : `${!hasExistingImportInvoice ? 'Importar' : importMode === 'replace' ? 'Substituir fatura e importar' : 'Adicionar'} ${importedExpenses.length} itens`}
                   </button>
               </Modal>
 
