@@ -602,6 +602,74 @@
         return 'Dividido';
       };
 
+      // Identidade conservadora de uma compra parcelada, independente do número atual.
+      const installmentMatchKey = (e, cfg, householdId) => {
+        if (e.householdId !== householdId || e.type !== 'Cartão' || !Number.isFinite(Number(e.amount)) || Number(e.amount) <= 0) return null;
+        const current = Number(e.installmentCurrent);
+        const total = Number(e.installmentTotal);
+        const m = String(e.monthKey || '').match(/^(\d{4})-(0[1-9]|1[0-2])$/);
+        if (!m || !Number.isInteger(current) || !Number.isInteger(total) || current < 1 || total < 2 || current > total) return null;
+        const bank = getExpenseBankId(e, cfg.cards);
+        if (!bank) return null;
+        const source = String(e.paymentSource || '');
+        const last4 = source.match(/\bfinal\s*(\d{4})\b/i)?.[1];
+        const card = last4 || findCardByPaymentSource(source, cfg.cards)?.last4;
+        // CSVs sem final de cartão só são comparados a outros CSVs sem final.
+        const cardKey = card ? `final:${card}` : `source:${norm(source)}`;
+        const description = norm(e.description)
+          .replace(new RegExp(`(?:\\bparcela\\s*)?\\b0*${current}\\s*\\/\\s*0*${total}\\b`, 'g'), '')
+          .replace(/\s+/g, ' ').replace(/[\s-]+$/, '').trim();
+        if (!description) return null;
+        const firstInvoice = Number(m[1]) * 12 + Number(m[2]) - current;
+        // C6/Itaú mantêm a data da compra; o CSV Nubank pode datar cada parcela.
+        let purchaseDate = '';
+        if (bank === 'c6' || bank === 'itau') {
+          const date = String(e.date || '').match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+          if (!date) return null;
+          purchaseDate = `${Number(date[1])}/${Number(date[2])}` + (bank === 'c6' ? `/${date[3]}` : '');
+        }
+        return JSON.stringify([bank, cardKey, description, total, Math.round(Number(e.amount) * 100), firstInvoice, purchaseDate]);
+      };
+
+      const inheritInstallmentSplits = (incoming, history, cfg, householdId) => {
+        const incomingCounts = new Map();
+        const historyByKey = new Map();
+        incoming.forEach(e => {
+          const key = installmentMatchKey(e, cfg, householdId);
+          if (key) incomingCounts.set(key, (incomingCounts.get(key) || 0) + 1);
+        });
+        history.forEach(e => {
+          const key = installmentMatchKey(e, cfg, householdId);
+          if (key) {
+            if (!historyByKey.has(key)) historyByKey.set(key, []);
+            historyByKey.get(key).push(e);
+          }
+        });
+        return incoming.map(e => {
+          const key = installmentMatchKey(e, cfg, householdId);
+          if (!key || incomingCounts.get(key) !== 1 || Number(e.installmentCurrent) <= 1) return e;
+          const candidates = (historyByKey.get(key) || []).filter(old =>
+            old.monthKey < e.monthKey && Number(old.installmentCurrent) < Number(e.installmentCurrent));
+          if (!candidates.length) return e;
+          // Duas compras indistinguíveis no mesmo mês: não adivinhar a divisão.
+          const months = new Set();
+          for (const old of candidates) {
+            if (months.has(old.monthKey)) return e;
+            months.add(old.monthKey);
+          }
+          const previous = candidates.reduce((latest, old) => old.monthKey > latest.monthKey ? old : latest);
+          let owner = previous.splitOwner;
+          if (!['personA', 'personB', 'shared'].includes(owner)) {
+            owner = isSplitPersonA(previous.split, cfg) ? 'personA'
+              : isSplitPersonB(previous.split, cfg) ? 'personB'
+              : norm(previous.split) === 'dividido' ? 'shared' : null;
+          }
+          if (!owner) return e;
+          return { ...e, split: owner === 'personA' ? nameA(cfg) : owner === 'personB' ? nameB(cfg) : 'Dividido',
+            splitOwner: owner, splitInheritedFromMonth: previous.monthKey };
+        });
+      };
+
       const uiOwner = (e, cfg) => {
         if (cfg) {
           if (isSplitPersonA(e.split, cfg)) return 'persona';
@@ -2623,6 +2691,9 @@
               amount: val,
               date: fData,
               split: fTipo === 'Ajuste' ? nameA(config) : fSplit,
+              splitOwner: fTipo === 'Ajuste' || isSplitPersonA(fSplit, config) ? 'personA'
+                : isSplitPersonB(fSplit, config) ? 'personB' : 'shared',
+              splitInheritedFromMonth: null,
               type: fTipo,
               paymentSource: fTipo === 'Cartão' ? fFonte : fTipo,
               paidBy: fTipo === 'Cartão' ? 'Cartão' : (fTipo === 'Ajuste' ? 'personB' : activePanel),
@@ -2727,14 +2798,25 @@
 
               const result = parserConfig.parse(data, config, householdId, currentMonth);
               setImportMode('add');
-              setImportedExpenses(result.expenses || []);
+              let parsedExpenses = result.expenses || [];
+              if (parsedExpenses.some(e => Number(e.installmentCurrent) > 1)) {
+                const historySnap = await fb.getDocs(query(collection(db, 'expenses'),
+                  where('householdId', '==', householdId))).catch(() => {
+                    throw new Error('HISTORY_UNAVAILABLE');
+                  });
+                parsedExpenses = inheritInstallmentSplits(parsedExpenses,
+                  historySnap.docs.map(d => d.data()), config, householdId);
+              }
+              setImportedExpenses(parsedExpenses);
               setImportDiscoveredCards(result.discovered || []);
               setImportBankId(result.bankId || bankId);
               setIsImportOpen(true);
           } catch (err) {
               console.error(err);
               const msg = String(err.message || err);
-              if (msg.startsWith('IMPORT_NOT_READY:')) {
+              if (msg === 'HISTORY_UNAVAILABLE') {
+                setImportError('Não foi possível consultar as divisões dos meses anteriores. Tente importar novamente.');
+              } else if (msg.startsWith('IMPORT_NOT_READY:')) {
                 setImportError(`Importação para ${msg.split(':')[1]} em breve.`);
               } else {
                 setImportError('Erro ao ler o arquivo. Verifique o formato da fatura.');
@@ -3292,6 +3374,7 @@
                     Banco: <strong>{getBankName(importBankId)}</strong> · {importedExpenses.length} lançamento(s)
                   </p>
                   <p className="text-sm mb-3 text-slate-500">Mês: {monthLabel(importedExpenses[0]?.monthKey || currentMonth)} · Total: {formatBRL(importedExpenses.reduce((sum, e) => sum + Number(e.amount || 0), 0))}</p>
+                  {importedExpenses.some(e => e.splitInheritedFromMonth) && <p className="text-sm mb-3 text-teal-700 dark:text-teal-300">Divisão anterior mantida automaticamente em {importedExpenses.filter(e => e.splitInheritedFromMonth).length} parcela(s). Você pode editar depois da importação.</p>}
                   {hasExistingImportInvoice && <fieldset disabled={isImporting} className="space-y-2 mb-4 text-sm text-slate-700 dark:text-slate-200">
                     <legend className="font-semibold mb-2">Como deseja importar?</legend>
                     <label className="flex gap-2 items-start p-2 border rounded-lg dark:border-slate-700">
@@ -3315,7 +3398,7 @@
                     </div>
                   )}
                   <div className="max-h-40 overflow-y-auto bg-slate-50 dark:bg-slate-800 p-2 text-xs mb-4 space-y-1 rounded border dark:border-slate-700">
-                      {importedExpenses.slice(0, 30).map((e,i)=><div key={i} className="flex justify-between text-slate-700 dark:text-slate-300"><span className="truncate pr-2">{e.description}</span><span>{formatBRL(e.amount)}</span></div>)}
+                      {importedExpenses.slice(0, 30).map((e,i)=><div key={i} className="flex justify-between gap-2 text-slate-700 dark:text-slate-300"><span className="min-w-0"><span className="block truncate">{e.description}</span>{e.splitInheritedFromMonth && <small className="block text-teal-700 dark:text-teal-300">{e.split} · mantido de {monthLabel(e.splitInheritedFromMonth)}</small>}</span><span className="shrink-0">{formatBRL(e.amount)}</span></div>)}
                       {importedExpenses.length > 30 && (
                         <p className="text-slate-500 pt-1">… e mais {importedExpenses.length - 30} itens</p>
                       )}
