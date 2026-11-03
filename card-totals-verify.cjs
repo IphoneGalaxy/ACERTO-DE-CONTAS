@@ -1,0 +1,21 @@
+const fs=require('node:fs'),assert=require('node:assert/strict');
+const s=fs.readFileSync(__dirname+'/index.html','utf8');
+const extract=(a,b)=>s.slice(s.indexOf(a),s.indexOf(b,s.indexOf(a)));
+const norm=s=>String(s||'').normalize('NFD').replace(/[\u0300-\u036f]/g,'').trim().toLowerCase();
+const find=new Function('norm',extract('      const findCardByPaymentSource =','      const inferOwnerFromLast4 =')+'return findCardByPaymentSource;')(norm);
+const code=extract('        const cardTotals = useMemo(() => {','        // Valor que "some"');
+const totals=(expenses,cards=[],filter='todos')=>new Function('expenses','config','cardBankFilter','useMemo','getExpenseBankId','findCardByPaymentSource','round2','getBankName',code+'return cardTotals;')(
+expenses,{cards},filter,f=>f(),(e,c)=>e.bankId||find(e.paymentSource,c)?.bankId||null,find,n=>Math.round(n*100)/100,id=>({nubank:'Nubank',c6:'C6 Bank'}[id]||''));
+const cards=[{id:'c6a',label:'Ana',last4:'1234',bankId:'c6'}];
+const expense=(source,bank,amount)=>({type:'Cartão',paymentSource:source,bankId:bank,amount});
+const items=[expense('Ana (final 1234)','c6',8514.28),expense('Nubank','nubank',71)];
+let t=totals(items,cards);assert.equal(t.cardsShown.length,2);assert.equal(t.grandTotal,8585.28);assert.equal(t.perCard[t.cardsShown[1].id],71);assert.equal(t.cardsShown[1].summaryLabel,'Nubank');
+const reconcile=t=>assert.equal(Math.round(Object.values(t.perCard).reduce((a,b)=>a+b,0)*100),Math.round(t.grandTotal*100));reconcile(t);
+t=totals(items,cards,'c6');assert.equal(t.cardsShown.length,1);assert.equal(t.grandTotal,8514.28);reconcile(t);
+t=totals(items,cards,'nubank');assert.equal(t.cardsShown.length,1);assert.equal(t.grandTotal,71);reconcile(t);
+t=totals([...items,expense('Nubank','nubank',-5)],[]);assert.equal(t.cardsShown.length,2);reconcile(t);
+t=totals([expense('Titular (final 4321)','nubank',12)],[]);assert(t.cardsShown[0].summaryLabel.includes('4321'));reconcile(t);
+t=totals([expense('Nubank','nubank',71)],[...cards,{id:'n',label:'Nubank pessoal',last4:'5555',bankId:'nubank'}]);assert.equal(t.perCard.n,0);assert.equal(t.cardsShown.length,3);reconcile(t);
+t=totals([expense('Ana (final 1234)','nubank',71)],cards);assert.equal(t.perCard.c6a,0);reconcile(t);
+assert.equal(cards.length,1);assert.equal(cards[0].summaryLabel,undefined);
+console.log('PASS resumo: Nubank sem cadastro, filtros, estorno, finais disponíveis, banco divergente, sem inventar associação, soma das linhas e configuração intacta');

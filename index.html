@@ -2579,8 +2579,18 @@
               const val = Number(e.amount||0);
               tot += val;
               const card = findCardByPaymentSource(e.paymentSource, config.cards);
-              if (card && (cardBankFilter === 'todos' || card.bankId === cardBankFilter)) {
+              if (card && (!eb || card.bankId === eb) && (cardBankFilter === 'todos' || card.bankId === cardBankFilter)) {
                 perCard[card.id] = (perCard[card.id] || 0) + val;
+              } else {
+                // CSVs sem identificação do cartão também precisam de uma linha no resumo.
+                // Não associar pelo banco: ele pode ter mais de um cartão cadastrado.
+                const source = String(e.paymentSource || '').trim();
+                const id = `unmatched:${JSON.stringify([eb || '', source])}`;
+                if (!Object.prototype.hasOwnProperty.call(perCard, id)) {
+                  cardsShown.push({ id, bankId: eb, summaryLabel: source || getBankName(eb) || 'Cartão não identificado' });
+                  perCard[id] = 0;
+                }
+                perCard[id] += val;
               }
           }
           return { grandTotal: round2(tot), perCard, cardsShown };
@@ -3101,14 +3111,14 @@
                       </div>
 
                       <div className="mt-2 pt-2 border-t border-slate-100 dark:border-slate-700 space-y-1 text-xs">
-                      {(config.cards || []).length === 0 && (
+                      {cardTotals.cardsShown.length === 0 && (
                         <p className="text-slate-500 dark:text-slate-400">Nenhum cartão configurado.</p>
                       )}
                       {(cardTotals.cardsShown || []).map((card) => (
                       <div key={card.id} className="flex justify-between">
                           <span className="text-slate-600 dark:text-slate-300">
-                          {cardDisplaySource(card)}
-                          {card.bankId && (
+                          {card.summaryLabel || cardDisplaySource(card)}
+                          {card.bankId && card.summaryLabel !== getBankName(card.bankId) && (
                             <span className="text-slate-400 dark:text-slate-500"> · {getBankName(card.bankId)}</span>
                           )}
                           </span>
