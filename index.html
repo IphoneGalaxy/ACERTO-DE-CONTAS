@@ -1201,6 +1201,14 @@
         const expenses = [];
         const dateRegex = /^\d{4}-\d{2}-\d{2}$/;
 
+        // Pagamentos liquidam o saldo transportado, mas não são novas compras.
+        // Trabalhar em centavos evita resíduos de arredondamento.
+        let previousBalancePayments = rows.slice(1).reduce((sum, row) => {
+          if (!row || !dateRegex.test(String(row[idxDate] || '').trim()) || !isNubankPaymentTitle(row[idxTitle])) return sum;
+          const value = parseNubankAmount(row[idxAmount]);
+          return sum + (Number.isFinite(value) && value < 0 ? Math.round(-value * 100) : 0);
+        }, 0);
+
         for (let i = 1; i < rows.length; i++) {
           const row = rows[i];
           if (!row || row.every(c => String(c || '').trim() === '')) continue;
@@ -1212,8 +1220,16 @@
           if (!rawDate || !dateRegex.test(rawDate)) continue;
           if (!rawTitle || isNubankPaymentTitle(rawTitle)) continue;
 
-          const amount = parseNubankAmount(rawAmount);
+          let amount = parseNubankAmount(rawAmount);
           if (Number.isNaN(amount)) continue;
+
+          if (norm(rawTitle) === 'valor pendente do mes anterior' && amount > 0) {
+            const pendingCents = Math.round(amount * 100);
+            const settledCents = Math.min(pendingCents, previousBalancePayments);
+            previousBalancePayments -= settledCents;
+            amount = (pendingCents - settledCents) / 100;
+            if (amount === 0) continue;
+          }
 
           // Compras positivas no CSV Nubank: amount > 0 = despesa
           // Valores negativos que não são pagamento = possível estorno
