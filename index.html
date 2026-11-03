@@ -815,6 +815,12 @@
       const fileReaders = {
         spreadsheet: readSpreadsheetFile,
         pdfText: readPdfFile,
+        nubank: async (file) => {
+          if (/\.pdf$/i.test(file.name)) return {format: 'pdf', data: await readPdfFile(file)};
+          if (/\.ofx$/i.test(file.name)) return {format: 'ofx', data: await file.text()};
+          if (/\.csv$/i.test(file.name)) return {format: 'csv', data: await readSpreadsheetFile(file)};
+          throw new Error('UNSUPPORTED_FORMAT');
+        },
       };
 
       // --- PARSER DE PARCELA (ATUALIZADO V2) ---
@@ -1266,6 +1272,7 @@
             paidBy: 'Cartão',
             monthKey: currentMonth,
             originalMonthKey: mk,
+            estimatedPurchaseMonth: isInstallment ? estimateNubankStartMonth(rawDate, installmentCurrent) : null,
             parcela,
             isInstallment,
             installmentTotal,
@@ -1277,6 +1284,129 @@
         }
 
         return { expenses, discovered: [], bankId: 'nubank' };
+      };
+
+      // Mês inicial estimado a partir do lançamento da parcela (não é a data da compra).
+      const estimateNubankStartMonth = (isoDate, current) => {
+        if (!/^\d{4}-(0[1-9]|1[0-2])-\d{2}$/.test(isoDate) || !Number.isInteger(current) || current < 1) return null;
+        const [year, month] = isoDate.split('-').map(Number);
+        const d = new Date(Date.UTC(year, month - current, 1));
+        return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}`;
+      };
+
+      const parseNubankOfx = (text, config, householdId, currentMonth) => {
+        if (!/<CREDITCARDMSGSRSV1>/i.test(text) || !/NU PAGAMENTOS|NUBANK/i.test(text)) throw new Error('NUBANK_PDF:OFX de cartão Nubank não reconhecido.');
+        const tag = (block, name) => block.match(new RegExp(`<${name}>([^<\\r\\n]*)`, 'i'))?.[1]?.trim() || '';
+        const rows = [['date', 'title', 'amount']];
+        for (const match of text.matchAll(/<STMTTRN>([\s\S]*?)<\/STMTTRN>/gi)) {
+          const block = match[1], date = tag(block, 'DTPOSTED').slice(0, 8), raw = tag(block, 'TRNAMT');
+          if (!/^\d{8}$/.test(date) || !/^-?\d+(?:\.\d+)?$/.test(raw)) throw new Error('NUBANK_PDF:Lançamento OFX inválido.');
+          // O OFX usa o sinal contrário ao CSV para a fatura de cartão.
+          const amount = -Number(raw);
+          rows.push([`${date.slice(0,4)}-${date.slice(4,6)}-${date.slice(6,8)}`, tag(block, 'MEMO').replace(/&amp;/g, '&'), amount.toFixed(2).replace('.', ',')]);
+        }
+        if (rows.length === 1) throw new Error('NUBANK_PDF:OFX sem lançamentos reconhecidos.');
+        return parseNubankCsv(rows, config, householdId, currentMonth);
+      };
+
+      const parseNubankPdf = (text, config, householdId, currentMonth) => {
+        const clean = String(text || '').replace(/[−–]/g, '-');
+        const lines = clean.split(/\r?\n/).map(l => l.replace(/\s+/g, ' ').trim()).filter(Boolean);
+        const months = ['JAN','FEV','MAR','ABR','MAI','JUN','JUL','AGO','SET','OUT','NOV','DEZ'];
+        const fail = (msg) => { throw new Error(`NUBANK_PDF:${msg}`); };
+        if (!/Nu Pagamentos|Nubank/i.test(clean)) fail('Este PDF não foi reconhecido como fatura Nubank.');
+        const due = clean.match(/Data de vencimento:\s*(\d{1,2})\s+([A-Z]{3})\s+(\d{4})/i);
+        if (!due || !months.includes(due[2].toUpperCase())) fail('Não foi possível identificar o vencimento da fatura.');
+        const dueMonth = `${due[3]}-${String(months.indexOf(due[2].toUpperCase()) + 1).padStart(2, '0')}`;
+        if (dueMonth !== currentMonth) fail(`A fatura é de ${dueMonth.split('-').reverse().join('/')}. Selecione esse mês para importar.`);
+        const dateIso = (day, mon) => {
+          const month = months.indexOf(mon.toUpperCase()) + 1;
+          const year = Number(due[3]) - (month > Number(dueMonth.slice(5)) ? 1 : 0);
+          const d = new Date(Date.UTC(year, month - 1, Number(day)));
+          if (!month || d.getUTCDate() !== Number(day) || d.getUTCMonth() !== month - 1) fail('Data inválida na fatura.');
+          return `${year}-${String(month).padStart(2,'0')}-${String(day).padStart(2,'0')}`;
+        };
+        const cents = value => Math.round(parseNubankAmount(value.replace(/R\$\s*/i, '')) * 100);
+        const summaryStart = lines.findIndex(l => /^RESUMO DA FATURA ATUAL$/i.test(l));
+        if (summaryStart < 0) fail('Resumo da fatura não encontrado.');
+        const summaryLines = lines.slice(summaryStart + 1, lines.findIndex((l,i) => i > summaryStart && /^PR[ÓO]XIMAS FATURAS/i.test(l)));
+        const summaryValue = label => {
+          const line = summaryLines.find(l => l.startsWith(label));
+          const value = line?.match(/(-?\s*R\$\s*[\d.]+,\d{2})\s*$/)?.[1];
+          return value ? cents(value) : null;
+        };
+        const expected = summaryValue('Total a pagar');
+        const purchasesExpected = summaryValue('Total de compras de todos os cartões');
+        const previous = summaryValue('Fatura anterior');
+        if (![expected, purchasesExpected, previous].every(Number.isFinite)) fail('Resumo da fatura incompleto. Nenhum lançamento foi importado.');
+        let inTransactions = false, holder = '', pending = '', txs = [], discovered = new Map();
+        const parseLine = line => {
+          const match = line.match(/^(\d{1,2})\s+([A-Z]{3})\s+(.+?)\s+(-?\s*R\$\s*[\d.]+,\d{2})$/i);
+          if (!match) return false;
+          let description = match[3].trim();
+          const card = description.match(/^[•●*·.]{4}\s*(\d{4})\s+(.+)$/);
+          const last4 = card?.[1] || '';
+          if (card) description = card[2].trim();
+          const amount = cents(match[4]);
+          if (!Number.isFinite(amount)) fail('Valor inválido em um lançamento.');
+          if (last4) {
+            const label = holder || 'Nubank';
+            discovered.set(last4, {label, last4});
+          }
+          txs.push({date: dateIso(match[1], match[2]), title: description, cents: amount, last4, holder});
+          return true;
+        };
+        for (const line of lines) {
+          if (/^TRANSA[ÇC][ÕO]ES(?:\s+DE\b|$)/i.test(line)) { inTransactions = true; pending = ''; continue; }
+          if (!inTransactions) continue;
+          if (/^(Em cumprimento|Como assegurado|Nu Pagamentos|LIMITES|RESUMO|PR[ÓO]XIMAS)/i.test(line)) { inTransactions = false; continue; }
+          if (/^(--- PAGINA|\d+ de \d+$|FATURA\s|EMISS[ÃA]O)/i.test(line)) continue;
+          if (/^\d{1,2}\s+[A-Z]{3}\b/i.test(line)) {
+            if (pending) fail('Há um lançamento incompleto no PDF.');
+            if (!parseLine(line)) pending = line;
+          } else if (pending) {
+            pending += ' ' + line;
+            if (parseLine(pending)) pending = '';
+          } else {
+            const heading = line.match(/^(.+?)\s+-?\s*R\$\s*[\d.]+,\d{2}$/);
+            if (heading) holder = /Pagamentos e Financiamentos/i.test(heading[1]) ? '' : heading[1].trim();
+          }
+        }
+        if (pending || !txs.length) fail('Não foi possível ler todos os lançamentos. Use o CSV ou outro PDF com texto selecionável.');
+        // Movimentos internos de renegociação só são removidos em pares de valor oposto.
+        const pairs = [['credito de atraso', 'saldo em atraso'], ['encerramento de divida', 'juros de divida encerrada']];
+        const removed = new Set();
+        for (const [credit, debit] of pairs) {
+          txs.forEach((tx, i) => {
+            if (removed.has(i) || norm(tx.title) !== credit || tx.cents >= 0 || tx.last4) return;
+            const j = txs.findIndex((other, k) => k !== i && !removed.has(k) && !other.last4 && norm(other.title) === debit && other.cents === -tx.cents && other.date === tx.date);
+            if (j >= 0) { removed.add(i); removed.add(j); }
+          });
+        }
+        const purchasesActual = txs.filter(tx => tx.last4).reduce((sum, tx) => sum + tx.cents, 0);
+        const totalActual = previous + txs.reduce((sum, tx) => sum + tx.cents, 0);
+        if (purchasesActual !== purchasesExpected || totalActual !== expected) fail('Os lançamentos lidos não fecham com o total do PDF. Nenhum item foi importado; confira o arquivo ou use o CSV.');
+        const rows = [['date','title','amount']];
+        const sources = new Map();
+        txs.forEach((tx, i) => {
+          if (removed.has(i) || tx.cents === 0) return;
+          const title = /^pagamento em\s+\d/i.test(norm(tx.title)) ? 'Pagamento recebido' : tx.title;
+          rows.push([tx.date, title, (tx.cents / 100).toFixed(2).replace('.', ',')]);
+          const inst = parseNubankInstallment(title);
+          sources.set(JSON.stringify([tx.date, inst.description, tx.cents]), tx);
+        });
+        if (previous > 0) rows.push([`${dueMonth}-01`, 'Valor pendente do mês anterior', (previous/100).toFixed(2).replace('.', ',')]);
+        const result = parseNubankCsv(rows, config, householdId, currentMonth);
+        result.expenses.forEach(e => {
+          const iso = e.date.split('/').reverse().join('-');
+          const tx = sources.get(JSON.stringify([iso, e.description, Math.round(e.amount*100)]));
+          if (tx?.last4) e.paymentSource = `${tx.holder || 'Nubank'} (final ${tx.last4})`;
+          e.invoiceDueDate = `${due[1].padStart(2,'0')}/${dueMonth.slice(5)}/${due[3]}`;
+          e.importFormat = 'nubank-pdf';
+        });
+        if (Math.round(result.expenses.reduce((sum,e)=>sum+e.amount,0)*100) !== expected) fail('O saldo final não fechou após conciliar os pagamentos. Use o CSV para conferir.');
+        result.discovered = Array.from(discovered.values());
+        return result;
       };
 
       // --- PARSER ITAÚ PDF ---
@@ -1488,9 +1618,10 @@
           parse: createImportStub('caixa'),
         },
         nubank: {
-          readMode: 'spreadsheet',
-          acceptedExtensions: ['.csv'],
-          parse: parseNubankCsv,
+          readMode: 'nubank',
+          acceptedExtensions: ['.csv', '.pdf', '.ofx'],
+          parse: (input, ...args) => input.format === 'pdf' ? parseNubankPdf(input.data, ...args)
+            : input.format === 'ofx' ? parseNubankOfx(input.data, ...args) : parseNubankCsv(input.data, ...args),
         },
         inter: {
           readMode: 'spreadsheet',
@@ -2840,7 +2971,9 @@
           } catch (err) {
               console.error(err);
               const msg = String(err.message || err);
-              if (msg === 'HISTORY_UNAVAILABLE') {
+              if (msg.startsWith('NUBANK_PDF:')) {
+                setImportError(msg.slice('NUBANK_PDF:'.length));
+              } else if (msg === 'HISTORY_UNAVAILABLE') {
                 setImportError('Não foi possível consultar as divisões dos meses anteriores. Tente importar novamente.');
               } else if (msg.startsWith('IMPORT_NOT_READY:')) {
                 setImportError(`Importação para ${msg.split(':')[1]} em breve.`);
@@ -3268,7 +3401,8 @@
                                   )}
                                 </div>
                                 <div className="text-xs text-slate-500 dark:text-slate-400 truncate mt-0.5">
-                                  {e.date} • {e.paymentSource}
+                                  {e.estimatedPurchaseMonth ? 'Lançamento: ' : ''}{e.date} • {e.paymentSource}
+                                  {e.estimatedPurchaseMonth && <span className="block">Início estimado: {monthLabel(e.estimatedPurchaseMonth)}</span>}
                                 </div>
                               </div>
                               
@@ -3424,7 +3558,7 @@
                     </div>
                   )}
                   <div className="max-h-40 overflow-y-auto bg-slate-50 dark:bg-slate-800 p-2 text-xs mb-4 space-y-1 rounded border dark:border-slate-700">
-                      {importedExpenses.slice(0, 30).map((e,i)=><div key={i} className="flex justify-between gap-2 text-slate-700 dark:text-slate-300"><span className="min-w-0"><span className="block truncate">{e.description}</span>{e.splitInheritedFromMonth && <small className="block text-teal-700 dark:text-teal-300">{e.split} · mantido de {monthLabel(e.splitInheritedFromMonth)}</small>}</span><span className="shrink-0">{formatBRL(e.amount)}</span></div>)}
+                      {importedExpenses.slice(0, 30).map((e,i)=><div key={i} className="flex justify-between gap-2 text-slate-700 dark:text-slate-300"><span className="min-w-0"><span className="block truncate">{e.description}</span>{e.estimatedPurchaseMonth && <small className="block text-slate-500">Início estimado: {monthLabel(e.estimatedPurchaseMonth)}</small>}{e.splitInheritedFromMonth && <small className="block text-teal-700 dark:text-teal-300">{e.split} · mantido de {monthLabel(e.splitInheritedFromMonth)}</small>}</span><span className="shrink-0">{formatBRL(e.amount)}</span></div>)}
                       {importedExpenses.length > 30 && (
                         <p className="text-slate-500 pt-1">… e mais {importedExpenses.length - 30} itens</p>
                       )}
